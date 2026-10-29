@@ -49,6 +49,8 @@ class Engine : public QObject {
         return host.root;
     }
     Q_INVOKABLE void importLocal(QList<QUrl> urls);
+    Q_INVOKABLE void setDownloadDirectory(QUrl url);
+    Q_INVOKABLE void decryptLocal(QList<QUrl> urls);
     Q_INVOKABLE void resize(double width, double height);
     Q_INVOKABLE void action(QString action);
     Q_INVOKABLE void submitForm(QString account, QString captcha);
@@ -134,6 +136,8 @@ class Engine : public QObject {
     void clearCredentials();
     void performanceRequested();
     void localImportRequested(bool folder);
+    void downloadDirectoryRequested();
+    void downloadDecryptRequested();
 
   protected:
     bool eventFilter(QObject *watched, QEvent *event) override;

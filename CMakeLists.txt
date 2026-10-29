@@ -142,6 +142,8 @@ set(RHINE_APP_SOURCES
     Qt/src/NativeHudLocal.cpp
     Qt/src/MusicLibrary.cpp
     Qt/src/MusicLibrary.h
+    Qt/src/DownloadCenter.cpp
+    Qt/src/DownloadCenter.h
     Qt/src/NativeHud.h
     Qt/src/NativeHud.cpp
     Qt/src/NativeHudController.cpp

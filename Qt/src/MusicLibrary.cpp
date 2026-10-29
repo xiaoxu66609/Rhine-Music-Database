@@ -14,7 +14,7 @@ int wrap(int value, int count) {
 
 /** 建立原生资料库和各类请求的独立代数，物理槽位保持原有五列八行映射。 */
 MusicLibrary::MusicLibrary(Host *host, const QJsonObject &content, QObject *parent)
-    : QObject(parent), host(host), api(host), player(host, &api), m_identityApi(host) {
+    : QObject(parent), host(host), api(host), player(host, &api), downloads(host, this), m_identityApi(host) {
     kugouEdition = host->preference("kugou-edition") == "lite" ? "lite" : "standard";
     provider = host->preference("provider");
     if (!QStringList{"netease", "qq", "kugou", "local"}.contains(provider)) {

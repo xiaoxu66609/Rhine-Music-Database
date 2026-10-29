@@ -36,7 +36,10 @@ const files = [...new Set(paths)].filter((file) => {
     if (!fs.existsSync(file)) {
         return false;
     }
-    if (/^(vendor|output|node_modules|MusicBridge\/upstream)\//.test(file)) {
+    if (
+        /^(vendor|output|node_modules|MusicBridge\/upstream|MusicBridge\/vendor)\//.test(file) ||
+        file === 'MusicBridge/download/core.cjs'
+    ) {
         return false;
     }
     return (

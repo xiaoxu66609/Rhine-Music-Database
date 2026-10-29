@@ -46,6 +46,8 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
     app = std::make_unique<NativeApplication>(&host, &m_glyphs, &scene, content);
     connect(&app->music, &MusicLibrary::playbackInvalidated, this, &Engine::refreshPlayback);
     connect(&app->hud, &NativeHud::localImportRequested, this, &Engine::localImportRequested);
+    connect(&app->hud, &NativeHud::downloadDirectoryRequested, this, &Engine::downloadDirectoryRequested);
+    connect(&app->hud, &NativeHud::downloadDecryptRequested, this, &Engine::downloadDecryptRequested);
 #ifdef Q_OS_DARWIN
     renderConfiguration.initialize([this](const QString &key) { return host.preference(key); });
     connect(&host, &Host::preferenceChanged, this, [this](const QString &key, const QString &value) {
@@ -899,5 +901,25 @@ void Engine::importLocal(QList<QUrl> urls) {
         }
     }
     app->music.importLocal(paths);
+    wake();
+}
+
+void Engine::setDownloadDirectory(QUrl url) {
+    if (!url.isLocalFile()) {
+        return;
+    }
+    app->music.downloads.setDirectory(url.toLocalFile());
+    wake();
+}
+
+void Engine::decryptLocal(QList<QUrl> urls) {
+    QStringList paths;
+    for (const auto &url : urls) {
+        if (url.isLocalFile()) {
+            paths.append(url.toLocalFile());
+        }
+    }
+    app->hud.openModal("downloads");
+    app->music.downloads.unlockFiles(paths);
     wake();
 }

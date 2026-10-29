@@ -317,6 +317,12 @@ void NativeHud::footer(double width) {
         }
     }
     text(session, 75, 967, 10, "regular", 0.9);
+    const int activeDownloads = m_music->downloads.activeCount();
+    if (activeDownloads > 0) {
+        const auto label = QStringLiteral("下载 ") + QString::number(activeDownloads);
+        text(label, 250, 967, 10, "demibold", 0.6);
+        hit(240, 952, 120, 28, "download:open", "下载队列");
+    }
     const auto credit = QStringLiteral("POWERED BY RHINE LAB");
     text(credit, width - 59 - m_glyphs->width(credit, 10, "demibold"), 967, 10, "demibold");
 }
@@ -370,6 +376,11 @@ void NativeHud::archive(double width) {
              QStringList{"playlist", "album", "folder"}.contains(music.directory->item["kind"].toString())) ||
             (!music.directory && music.selectedLane == 1)) {
             control("播放全部 →", 59, music.directory ? 319 : 211, 310, "music:play-loaded");
+            if (!music.isLocal()) {
+                const bool album = music.directory && music.directory->item["kind"] == "album";
+                control(album ? "下载整张 →" : "下载已加载 →", 59, music.directory ? 373 : 265, 310,
+                        "download:loaded");
+            }
         }
         const bool showTrackList = trackListMode && item["kind"] == "song";
         if (!showTrackList) {

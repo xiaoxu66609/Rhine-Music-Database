@@ -14,9 +14,9 @@ struct Provider {
 };
 const QVector<Provider> providers = [] {
     QVector<Provider> values{
-        {"netease", "网易云音乐", "NETEASE", "搜索 · 个人音乐 · 推荐 · 播放 · 歌单编辑"},
-        {"qq", "QQ 音乐", "QQ MUSIC", "全类搜索 · 每日推荐 · 个人音乐 · 歌单编辑"},
-        {"kugou", "酷狗音乐", "KUGOU", "标准版 / 概念版 · 个人歌单 · 推荐与榜单 · 播放"},
+        {"netease", "网易云音乐", "NETEASE", "搜索 · 个人音乐 · 推荐 · 播放 · 下载 · 歌单编辑"},
+        {"qq", "QQ 音乐", "QQ MUSIC", "全类搜索 · 每日推荐 · 个人音乐 · 下载 · 歌单编辑"},
+        {"kugou", "酷狗音乐", "KUGOU", "标准版 / 概念版 · 个人歌单 · 推荐与榜单 · 播放 · 下载"},
         {"local", "本地音乐", "LOCAL", "文件夹管理 · 导入与索引 · 本地检索 · 播放"},
     };
     if (!PlatformFeatures::LocalMusic) {
@@ -32,6 +32,7 @@ QString modalTitle(const QString &modal, const MusicLibrary &music) {
                                                 {"disc-rotation-warning", "DISC ROTATION"},
                                                 {"saved", "MY MUSIC"},
                                                 {"player", "NOW PLAYING"},
+                                                {"downloads", "DOWNLOAD ARCHIVE"},
                                                 {"discover", "DISCOVER MUSIC"},
                                                 {"playlist-form", "PLAYLIST EDITOR"},
                                                 {"playlist-picker", "PLAYLIST DIRECTORY"},
@@ -56,6 +57,7 @@ QString modalSubtitle(const QString &modal, const MusicLibrary &music) {
                                                    {"quality", "声音档案 / 播放音质"},
                                                    {"disc-rotation-warning", "开启前请确认资源与功耗风险"},
                                                    {"player", "播放队列 / QUEUE"},
+                                                   {"downloads", "下载队列 / 标签、歌词与专辑封装"},
                                                    {"discover", "推荐 / 排行榜 / 新专辑"},
                                                    {"playlist-form", "编辑我的歌单"},
                                                    {"playlist-picker", "添加到我的歌单"},
@@ -177,6 +179,8 @@ void NativeHud::modalDraw(double width) {
         category = "SYSTEM PREFERENCES";
     } else if (modal == "player") {
         category = "AUDIO TERMINAL";
+    } else if (modal == "downloads") {
+        category = "ARCHIVE TRANSFER";
     } else if (modal == "quality") {
         category = "AUDIO SPECIFICATION";
     }
@@ -197,10 +201,17 @@ void NativeHud::modalDraw(double width) {
         platformPanel(x, y, usable);
     } else if (modal == "confirm") {
         limited(confirmTitle, x + 53, y + 260, 24, usable - 106, "demibold");
-        text(music.isLocal() ? "只移除本地索引，磁盘音乐文件保持原样。"
-                             : "此操作将同步至" + music.providerName() + "。",
-             x + 53, y + 330, 16);
-        button("确认删除", x + 53, y + 450, 180, 45, "confirm:yes", 16);
+        const auto body =
+            confirmBody.isEmpty()
+                ? (music.isLocal() ? QStringLiteral("只移除本地索引，磁盘音乐文件保持原样。")
+                                   : QStringLiteral("此操作将同步至") + music.providerName() + "。")
+                : confirmBody;
+        const auto lines = m_glyphs->wrap(body, usable - 106, 16);
+        for (int index = 0; index < std::min(4, int(lines.size())); ++index) {
+            text(lines.at(index), x + 53, y + 320 + index * 28, 16);
+        }
+        button(confirmAccept.isEmpty() ? QStringLiteral("确认删除") : confirmAccept, x + 53, y + 450, 180, 45,
+               "confirm:yes", 16);
         button("取消", x + 270, y + 450, 150, 45, "close-modal", 16);
     } else if (modal == "playlist-picker") {
         text("选择我的歌单", x + 53, y + 240, 18);
@@ -230,6 +241,8 @@ void NativeHud::modalDraw(double width) {
         discoverPanel(x, y, usable);
     } else if (modal == "player") {
         playerPanel(x, y, usable);
+    } else if (modal == "downloads") {
+        downloadPanel(x, y, usable);
     } else if (modal == "settings") {
         settings(x, y, usable);
     } else if (modal == "login") {
@@ -469,6 +482,53 @@ RhineFg::FrameGenerationUi frameGenerationUi(const Host *host, bool preferenceOn
 
 } // namespace
 
+void NativeHud::downloadPanel(double x, double y, double width) {
+    auto &downloads = m_music->downloads;
+    const auto left = x + 53;
+    const auto usable = width - 106;
+    const QVector<QPair<QString, QString>> filters{
+        {"all", "全部"}, {"running", "下载中"}, {"done", "已完成"}, {"failed", "错误"}};
+    for (int index = 0; index < filters.size(); ++index) {
+        const auto &entry = filters.at(index);
+        const auto label =
+            entry.second + (downloads.filter == entry.first ? QStringLiteral(" ·") : QString());
+        button(label, left + index * 160, y + 200, 148, 36, "download:filter:" + entry.first, 14);
+    }
+    limited("音质 " + downloads.qualityLabel() + "   歌词 " + downloads.lyricLabel() + "   " +
+                downloads.identityLabel() + "   " + QString::number(downloads.concurrency()) + " 路",
+            left, y + 252, 13, usable);
+    QVector<QJsonObject> visible;
+    for (const auto &value : downloads.jobs) {
+        const auto job = value.toObject();
+        if (DownloadCenter::matches(job, downloads.filter)) {
+            visible.append(job);
+        }
+    }
+    downloads.offset = std::clamp(downloads.offset, 0, std::max(0, int(visible.size()) - 6));
+    if (visible.isEmpty()) {
+        text(downloads.jobs.isEmpty() ? "还没有下载任务。在歌曲或专辑页把曲目加入队列。" : "这一栏是空的",
+             left, y + 340, 16);
+    }
+    for (int row = 0; row < 6 && downloads.offset + row < visible.size(); ++row) {
+        const auto job = visible.at(downloads.offset + row);
+        const auto yy = y + 300 + row * 64;
+        limited(job["title"].toString() + " / " + job["artist"].toString(), left, yy, 16, usable - 120,
+                "demibold");
+        limited(DownloadCenter::stateLabel(job), left, yy + 24, 13, usable - 120);
+        const auto state = job["state"].toString();
+        if (state == "queued" || state == "running") {
+            button("取消", left + usable - 90, yy, 90, 40, "download:cancel:" + job["id"].toString(), 14);
+        } else if (state == "failed" || state == "cancelled") {
+            button("重试", left + usable - 90, yy, 90, 40, "download:retry:" + job["id"].toString(), 14);
+        }
+        rule(left, yy + 50, usable, 0.15);
+    }
+    button("↑", left, y + 700, 70, 36, "download:page:-1", 14);
+    button("↓", left + 82, y + 700, 70, 36, "download:page:1", 14);
+    limited(downloads.notice.isEmpty() ? downloads.directory() : downloads.notice, left + 170, y + 708, 13,
+            usable - 170);
+}
+
 void NativeHud::settings(double x, double y, double width) {
     const auto &music = *m_music;
     static const QHash<QString, QString> qualities{
@@ -653,8 +713,8 @@ void NativeHud::settings(double x, double y, double width) {
 #ifdef Q_OS_DARWIN
     rows.append({"METALFX / 帧生成 · 重启生效", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
 #else
-    rows.append({"FRAME GENERATION / 帧生成 · 重启生效", fgUi.value,
-                 fgUi.clickable ? "fg" : "fg:unavailable"});
+    rows.append(
+        {"FRAME GENERATION / 帧生成 · 重启生效", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
 #endif
 #else
     // 帧生成是独立开关，不随抗锯齿模式循环。呈现层在能力可用时常驻接管窗口，
@@ -665,6 +725,20 @@ void NativeHud::settings(double x, double y, double width) {
     rows.append({"FRAME GENERATION / 帧生成", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
 #endif
 #endif
+    if (!music.isLocal()) {
+        rows.append({"DOWNLOAD QUALITY / 下载音质", music.downloads.qualityLabel(), "download:quality"});
+        rows.append({"DOWNLOAD LYRICS / 歌词保存", music.downloads.lyricLabel(), "download:lyric"});
+        if (music.provider == "qq" || music.provider == "netease") {
+            rows.append(
+                {"DOWNLOAD IDENTITY / 下载身份", music.downloads.identityLabel(), "download:identity"});
+        }
+        rows.append({"DOWNLOAD TASKS / 同时下载", QString::number(music.downloads.concurrency()) + " 首",
+                     "download:concurrency"});
+    }
+    rows.append({"DOWNLOAD FOLDER / " + fit(music.downloads.directory(), 18, width - 460), "更改目录",
+                 "download:directory"});
+    rows.append({"DOWNLOAD QUEUE / 下载队列", "打开", "download:open"});
+    rows.append({"QMC UNLOCK / 解密 QQ 加密文件", "选择文件", "download:decrypt"});
     // 内容高度随平台可用选项变化
     constexpr double preferenceTop = 424;
     constexpr double rowStep = 66;
