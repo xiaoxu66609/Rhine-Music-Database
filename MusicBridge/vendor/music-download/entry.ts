@@ -20,3 +20,9 @@ export { DownloadQueue } from './downloader/queue'
 export { RateLimiter } from './downloader/ratelimit'
 export { tagFile } from './tagger/index'
 export { decryptQmcFile } from './unlock/decrypt'
+export {
+  decryptNcmFile,
+  decryptNcmKeyBlock,
+  decryptNcmMetaBlock,
+  parseNcmMetaJson,
+} from './unlock/ncm'

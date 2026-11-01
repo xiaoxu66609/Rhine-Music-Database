@@ -738,7 +738,7 @@ void NativeHud::settings(double x, double y, double width) {
     rows.append({"DOWNLOAD FOLDER / " + fit(music.downloads.directory(), 18, width - 460), "更改目录",
                  "download:directory"});
     rows.append({"DOWNLOAD QUEUE / 下载队列", "打开", "download:open"});
-    rows.append({"QMC UNLOCK / 解密 QQ 加密文件", "选择文件", "download:decrypt"});
+    rows.append({"UNLOCK / 解密 QQ 加密与网易云 NCM", "选择文件", "download:decrypt"});
     // 内容高度随平台可用选项变化
     constexpr double preferenceTop = 424;
     constexpr double rowStep = 66;

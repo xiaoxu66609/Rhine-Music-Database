@@ -204,6 +204,22 @@ test('QQ 加密文件解密后落盘，无法识别的扩展名记失败', async
     fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('NCM 密钥段 AES 向量与 ncmc 一致', () => {
+    const input = Buffer.from([
+        44, 206, 213, 235, 105, 234, 251, 20, 85, 13, 69, 191, 97, 221, 23, 29, 18, 21, 246, 51, 21, 69, 239,
+        181, 244, 6, 32, 104, 211, 135, 179, 202, 61, 32, 50, 218, 231, 3, 85, 33, 145, 113, 162, 72, 254, 143,
+        136, 190, 39, 101, 206, 78, 98, 101, 116, 215, 145, 212, 45, 190, 39, 210, 209, 192, 188, 100, 141, 243,
+        48, 248, 186, 138, 64, 32, 93, 82, 40, 16, 113, 0, 51, 165, 195, 243, 34, 188, 96, 243, 168, 178, 144, 252,
+        165, 149, 122, 109, 247, 164, 233, 37, 82, 40, 214, 0, 159, 5, 178, 114, 243, 218, 126, 60, 20, 5, 164,
+        198, 166, 244, 88, 15, 95, 132, 197, 175, 252, 215, 77, 30,
+    ]);
+    const key = core.decryptNcmKeyBlock(input);
+    assert.equal(
+        Buffer.from(key).toString('utf8'),
+        '143621215014397E7fT49x7dof9OKCgg9cdvhEuezy3iZCL1nFvBFd1T4uSktAJKmwZXsijPbijliionVUXXg9plTbXEclAE9Lb',
+    );
+});
+
 test('makeBundle 多碟懒加载只抬高整辑 totalTracks，不污染各碟 discTotals', () => {
     const tracks = [
         { id: '1', name: '碟一', artist: '歌手', disc: 1, trackNo: 1 },

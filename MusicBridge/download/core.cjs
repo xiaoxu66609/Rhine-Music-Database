@@ -33,9 +33,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// ../../../tmp/nd-id3/node_modules/node-id3/src/ID3Definitions.js
+// MusicBridge/vendor/music-download/node_modules/node-id3/src/ID3Definitions.js
 var require_ID3Definitions = __commonJS({
-  "../../../tmp/nd-id3/node_modules/node-id3/src/ID3Definitions.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/node-id3/src/ID3Definitions.js"(exports2, module2) {
     var FRAME_IDENTIFIERS = {
       v2: {
         album: "TAL",
@@ -461,9 +461,9 @@ var require_ID3Definitions = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/safer-buffer/safer.js
+// MusicBridge/vendor/music-download/node_modules/safer-buffer/safer.js
 var require_safer = __commonJS({
-  "../../../tmp/nd-id3/node_modules/safer-buffer/safer.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/safer-buffer/safer.js"(exports2, module2) {
     "use strict";
     var buffer = require("buffer");
     var Buffer2 = buffer.Buffer;
@@ -529,9 +529,9 @@ var require_safer = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/lib/bom-handling.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/lib/bom-handling.js
 var require_bom_handling = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/lib/bom-handling.js"(exports2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/lib/bom-handling.js"(exports2) {
     "use strict";
     var BOMChar = "\uFEFF";
     exports2.PrependBOM = PrependBOMWrapper;
@@ -573,9 +573,9 @@ var require_bom_handling = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/internal.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/internal.js
 var require_internal = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/internal.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/internal.js"(exports2, module2) {
     "use strict";
     var Buffer2 = require_safer().Buffer;
     module2.exports = {
@@ -725,9 +725,9 @@ var require_internal = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/utf32.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/utf32.js
 var require_utf32 = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/utf32.js"(exports2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/utf32.js"(exports2) {
     "use strict";
     var Buffer2 = require_safer().Buffer;
     exports2._utf32 = Utf32Codec;
@@ -944,9 +944,9 @@ var require_utf32 = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/utf16.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/utf16.js
 var require_utf16 = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/utf16.js"(exports2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/utf16.js"(exports2) {
     "use strict";
     var Buffer2 = require_safer().Buffer;
     exports2.utf16be = Utf16BECodec;
@@ -1078,9 +1078,9 @@ var require_utf16 = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/utf7.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/utf7.js
 var require_utf7 = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/utf7.js"(exports2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/utf7.js"(exports2) {
     "use strict";
     var Buffer2 = require_safer().Buffer;
     exports2.utf7 = Utf7Codec;
@@ -1279,9 +1279,9 @@ var require_utf7 = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/sbcs-codec.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/sbcs-codec.js
 var require_sbcs_codec = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/sbcs-codec.js"(exports2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/sbcs-codec.js"(exports2) {
     "use strict";
     var Buffer2 = require_safer().Buffer;
     exports2._sbcs = SBCSCodec;
@@ -1335,9 +1335,9 @@ var require_sbcs_codec = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/sbcs-data.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/sbcs-data.js
 var require_sbcs_data = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/sbcs-data.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/sbcs-data.js"(exports2, module2) {
     "use strict";
     module2.exports = {
       // Not supported by iconv, not sure why.
@@ -1488,9 +1488,9 @@ var require_sbcs_data = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/sbcs-data-generated.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/sbcs-data-generated.js
 var require_sbcs_data_generated = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/sbcs-data-generated.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/sbcs-data-generated.js"(exports2, module2) {
     "use strict";
     module2.exports = {
       "437": "cp437",
@@ -1943,9 +1943,9 @@ var require_sbcs_data_generated = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/dbcs-codec.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/dbcs-codec.js
 var require_dbcs_codec = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/dbcs-codec.js"(exports2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/dbcs-codec.js"(exports2) {
     "use strict";
     var Buffer2 = require_safer().Buffer;
     exports2._dbcs = DBCSCodec;
@@ -2360,9 +2360,9 @@ var require_dbcs_codec = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/shiftjis.json
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/shiftjis.json
 var require_shiftjis = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/shiftjis.json"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/shiftjis.json"(exports2, module2) {
     module2.exports = [
       ["0", "\0", 128],
       ["a1", "\uFF61", 62],
@@ -2491,9 +2491,9 @@ var require_shiftjis = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/eucjp.json
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/eucjp.json
 var require_eucjp = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/eucjp.json"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/eucjp.json"(exports2, module2) {
     module2.exports = [
       ["0", "\0", 127],
       ["8ea1", "\uFF61", 62],
@@ -2679,9 +2679,9 @@ var require_eucjp = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/cp936.json
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/cp936.json
 var require_cp936 = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/cp936.json"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/cp936.json"(exports2, module2) {
     module2.exports = [
       ["0", "\0", 127, "\u20AC"],
       ["8140", "\u4E02\u4E04\u4E05\u4E06\u4E0F\u4E12\u4E17\u4E1F\u4E20\u4E21\u4E23\u4E26\u4E29\u4E2E\u4E2F\u4E31\u4E33\u4E35\u4E37\u4E3C\u4E40\u4E41\u4E42\u4E44\u4E46\u4E4A\u4E51\u4E55\u4E57\u4E5A\u4E5B\u4E62\u4E63\u4E64\u4E65\u4E67\u4E68\u4E6A", 5, "\u4E72\u4E74", 9, "\u4E7F", 6, "\u4E87\u4E8A"],
@@ -2949,9 +2949,9 @@ var require_cp936 = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/gbk-added.json
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/gbk-added.json
 var require_gbk_added = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/gbk-added.json"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/gbk-added.json"(exports2, module2) {
     module2.exports = [
       ["a140", "\uE4C6", 62],
       ["a180", "\uE505", 32],
@@ -3011,16 +3011,16 @@ var require_gbk_added = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/gb18030-ranges.json
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/gb18030-ranges.json
 var require_gb18030_ranges = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/gb18030-ranges.json"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/gb18030-ranges.json"(exports2, module2) {
     module2.exports = { uChars: [128, 165, 169, 178, 184, 216, 226, 235, 238, 244, 248, 251, 253, 258, 276, 284, 300, 325, 329, 334, 364, 463, 465, 467, 469, 471, 473, 475, 477, 506, 594, 610, 712, 716, 730, 930, 938, 962, 970, 1026, 1104, 1106, 8209, 8215, 8218, 8222, 8231, 8241, 8244, 8246, 8252, 8365, 8452, 8454, 8458, 8471, 8482, 8556, 8570, 8596, 8602, 8713, 8720, 8722, 8726, 8731, 8737, 8740, 8742, 8748, 8751, 8760, 8766, 8777, 8781, 8787, 8802, 8808, 8816, 8854, 8858, 8870, 8896, 8979, 9322, 9372, 9548, 9588, 9616, 9622, 9634, 9652, 9662, 9672, 9676, 9680, 9702, 9735, 9738, 9793, 9795, 11906, 11909, 11913, 11917, 11928, 11944, 11947, 11951, 11956, 11960, 11964, 11979, 12284, 12292, 12312, 12319, 12330, 12351, 12436, 12447, 12535, 12543, 12586, 12842, 12850, 12964, 13200, 13215, 13218, 13253, 13263, 13267, 13270, 13384, 13428, 13727, 13839, 13851, 14617, 14703, 14801, 14816, 14964, 15183, 15471, 15585, 16471, 16736, 17208, 17325, 17330, 17374, 17623, 17997, 18018, 18212, 18218, 18301, 18318, 18760, 18811, 18814, 18820, 18823, 18844, 18848, 18872, 19576, 19620, 19738, 19887, 40870, 59244, 59336, 59367, 59413, 59417, 59423, 59431, 59437, 59443, 59452, 59460, 59478, 59493, 63789, 63866, 63894, 63976, 63986, 64016, 64018, 64021, 64025, 64034, 64037, 64042, 65074, 65093, 65107, 65112, 65127, 65132, 65375, 65510, 65536], gbChars: [0, 36, 38, 45, 50, 81, 89, 95, 96, 100, 103, 104, 105, 109, 126, 133, 148, 172, 175, 179, 208, 306, 307, 308, 309, 310, 311, 312, 313, 341, 428, 443, 544, 545, 558, 741, 742, 749, 750, 805, 819, 820, 7922, 7924, 7925, 7927, 7934, 7943, 7944, 7945, 7950, 8062, 8148, 8149, 8152, 8164, 8174, 8236, 8240, 8262, 8264, 8374, 8380, 8381, 8384, 8388, 8390, 8392, 8393, 8394, 8396, 8401, 8406, 8416, 8419, 8424, 8437, 8439, 8445, 8482, 8485, 8496, 8521, 8603, 8936, 8946, 9046, 9050, 9063, 9066, 9076, 9092, 9100, 9108, 9111, 9113, 9131, 9162, 9164, 9218, 9219, 11329, 11331, 11334, 11336, 11346, 11361, 11363, 11366, 11370, 11372, 11375, 11389, 11682, 11686, 11687, 11692, 11694, 11714, 11716, 11723, 11725, 11730, 11736, 11982, 11989, 12102, 12336, 12348, 12350, 12384, 12393, 12395, 12397, 12510, 12553, 12851, 12962, 12973, 13738, 13823, 13919, 13933, 14080, 14298, 14585, 14698, 15583, 15847, 16318, 16434, 16438, 16481, 16729, 17102, 17122, 17315, 17320, 17402, 17418, 17859, 17909, 17911, 17915, 17916, 17936, 17939, 17961, 18664, 18703, 18814, 18962, 19043, 33469, 33470, 33471, 33484, 33485, 33490, 33497, 33501, 33505, 33513, 33520, 33536, 33550, 37845, 37921, 37948, 38029, 38038, 38064, 38065, 38066, 38069, 38075, 38076, 38078, 39108, 39109, 39113, 39114, 39115, 39116, 39265, 39394, 189e3] };
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/cp949.json
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/cp949.json
 var require_cp949 = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/cp949.json"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/cp949.json"(exports2, module2) {
     module2.exports = [
       ["0", "\0", 127],
       ["8141", "\uAC02\uAC03\uAC05\uAC06\uAC0B", 4, "\uAC18\uAC1E\uAC1F\uAC21\uAC22\uAC23\uAC25", 6, "\uAC2E\uAC32\uAC33\uAC34"],
@@ -3297,9 +3297,9 @@ var require_cp949 = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/cp950.json
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/cp950.json
 var require_cp950 = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/cp950.json"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/cp950.json"(exports2, module2) {
     module2.exports = [
       ["0", "\0", 127],
       ["a140", "\u3000\uFF0C\u3001\u3002\uFF0E\u2027\uFF1B\uFF1A\uFF1F\uFF01\uFE30\u2026\u2025\uFE50\uFE51\uFE52\xB7\uFE54\uFE55\uFE56\uFE57\uFF5C\u2013\uFE31\u2014\uFE33\u2574\uFE34\uFE4F\uFF08\uFF09\uFE35\uFE36\uFF5B\uFF5D\uFE37\uFE38\u3014\u3015\uFE39\uFE3A\u3010\u3011\uFE3B\uFE3C\u300A\u300B\uFE3D\uFE3E\u3008\u3009\uFE3F\uFE40\u300C\u300D\uFE41\uFE42\u300E\u300F\uFE43\uFE44\uFE59\uFE5A"],
@@ -3480,9 +3480,9 @@ var require_cp950 = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/big5-added.json
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/big5-added.json
 var require_big5_added = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/tables/big5-added.json"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/tables/big5-added.json"(exports2, module2) {
     module2.exports = [
       ["8740", "\u43F0\u4C32\u4603\u45A6\u4578\u{27267}\u4D77\u45B3\u{27CB1}\u4CE2\u{27CC5}\u3B95\u4736\u4744\u4C47\u4C40\u{242BF}\u{23617}\u{27352}\u{26E8B}\u{270D2}\u4C57\u{2A351}\u474F\u45DA\u4C85\u{27C6C}\u4D07\u4AA4\u46A1\u{26B23}\u7225\u{25A54}\u{21A63}\u{23E06}\u{23F61}\u664D\u56FB"],
       ["8767", "\u7D95\u591D\u{28BB9}\u3DF4\u9734\u{27BEF}\u5BDB\u{21D5E}\u5AA4\u3625\u{29EB0}\u5AD1\u5BB7\u5CFC\u676E\u8593\u{29945}\u7461\u749D\u3875\u{21D53}\u{2369E}\u{26021}\u3EEC"],
@@ -3608,9 +3608,9 @@ var require_big5_added = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/dbcs-data.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/dbcs-data.js
 var require_dbcs_data = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/dbcs-data.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/dbcs-data.js"(exports2, module2) {
     "use strict";
     module2.exports = {
       // == Japanese/ShiftJIS ====================================================
@@ -3783,9 +3783,9 @@ var require_dbcs_data = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/encodings/index.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/index.js
 var require_encodings = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/encodings/index.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/encodings/index.js"(exports2, module2) {
     "use strict";
     var modules = [
       require_internal(),
@@ -3810,9 +3810,9 @@ var require_encodings = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/lib/streams.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/lib/streams.js
 var require_streams = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/lib/streams.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/lib/streams.js"(exports2, module2) {
     "use strict";
     var Buffer2 = require_safer().Buffer;
     module2.exports = function(stream_module) {
@@ -3905,9 +3905,9 @@ var require_streams = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/iconv-lite/lib/index.js
+// MusicBridge/vendor/music-download/node_modules/iconv-lite/lib/index.js
 var require_lib = __commonJS({
-  "../../../tmp/nd-id3/node_modules/iconv-lite/lib/index.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/iconv-lite/lib/index.js"(exports2, module2) {
     "use strict";
     var Buffer2 = require_safer().Buffer;
     var bomHandling = require_bom_handling();
@@ -4025,9 +4025,9 @@ var require_lib = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/node-id3/src/ID3Util.js
+// MusicBridge/vendor/music-download/node_modules/node-id3/src/ID3Util.js
 var require_ID3Util = __commonJS({
-  "../../../tmp/nd-id3/node_modules/node-id3/src/ID3Util.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/node-id3/src/ID3Util.js"(exports2, module2) {
     var iconv = require_lib();
     var ID3Definitions = require_ID3Definitions();
     var ENCODINGS = [
@@ -4212,9 +4212,9 @@ var require_ID3Util = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/node-id3/src/ID3FrameBuilder.js
+// MusicBridge/vendor/music-download/node_modules/node-id3/src/ID3FrameBuilder.js
 var require_ID3FrameBuilder = __commonJS({
-  "../../../tmp/nd-id3/node_modules/node-id3/src/ID3FrameBuilder.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/node-id3/src/ID3FrameBuilder.js"(exports2, module2) {
     module2.exports = ID3FrameBuilder;
     var ID3Util = require_ID3Util();
     function ID3FrameBuilder(identifier) {
@@ -4279,9 +4279,9 @@ var require_ID3FrameBuilder = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/node-id3/src/ID3FrameReader.js
+// MusicBridge/vendor/music-download/node_modules/node-id3/src/ID3FrameReader.js
 var require_ID3FrameReader = __commonJS({
-  "../../../tmp/nd-id3/node_modules/node-id3/src/ID3FrameReader.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/node-id3/src/ID3FrameReader.js"(exports2, module2) {
     module2.exports = ID3FrameReader;
     var ID3Util = require_ID3Util();
     function ID3FrameReader(buffer, encodingBytePosition, consumeEncodingByte = true) {
@@ -4347,17 +4347,17 @@ var require_ID3FrameReader = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/node-id3/src/util.js
+// MusicBridge/vendor/music-download/node_modules/node-id3/src/util.js
 var require_util = __commonJS({
-  "../../../tmp/nd-id3/node_modules/node-id3/src/util.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/node-id3/src/util.js"(exports2, module2) {
     module2.exports.isFunction = (value) => typeof value === "function";
     module2.exports.isString = (value) => typeof value === "string" || value instanceof String;
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/node-id3/src/ID3Frames.js
+// MusicBridge/vendor/music-download/node_modules/node-id3/src/ID3Frames.js
 var require_ID3Frames = __commonJS({
-  "../../../tmp/nd-id3/node_modules/node-id3/src/ID3Frames.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/node-id3/src/ID3Frames.js"(exports2, module2) {
     var fs5 = require("fs");
     var ID3FrameBuilder = require_ID3FrameBuilder();
     var ID3FrameReader = require_ID3FrameReader();
@@ -4775,9 +4775,9 @@ var require_ID3Frames = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/node-id3/src/ID3Helpers.js
+// MusicBridge/vendor/music-download/node_modules/node-id3/src/ID3Helpers.js
 var require_ID3Helpers = __commonJS({
-  "../../../tmp/nd-id3/node_modules/node-id3/src/ID3Helpers.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/node-id3/src/ID3Helpers.js"(exports2, module2) {
     var zlib = require("zlib");
     var ID3Definitions = require_ID3Definitions();
     var ID3Frames = require_ID3Frames();
@@ -4985,9 +4985,9 @@ var require_ID3Helpers = __commonJS({
   }
 });
 
-// ../../../tmp/nd-id3/node_modules/node-id3/index.js
+// MusicBridge/vendor/music-download/node_modules/node-id3/index.js
 var require_node_id3 = __commonJS({
-  "../../../tmp/nd-id3/node_modules/node-id3/index.js"(exports2, module2) {
+  "MusicBridge/vendor/music-download/node_modules/node-id3/index.js"(exports2, module2) {
     var fs5 = require("fs");
     var ID3Definitions = require_ID3Definitions();
     var ID3Util = require_ID3Util();
@@ -5236,6 +5236,9 @@ __export(entry_exports, {
   albumRootDir: () => albumRootDir,
   albumTrackDir: () => albumTrackDir,
   cdnFallbackUrls: () => cdnFallbackUrls,
+  decryptNcmFile: () => decryptNcmFile,
+  decryptNcmKeyBlock: () => decryptNcmKeyBlock,
+  decryptNcmMetaBlock: () => decryptNcmMetaBlock,
   decryptQmcFile: () => decryptQmcFile,
   discOf: () => discOf,
   downloadFile: () => downloadFile,
@@ -5246,6 +5249,7 @@ __export(entry_exports, {
   mkBundle: () => mkBundle,
   normalizeDate: () => normalizeDate,
   parseLrcLine: () => parseLrcLine,
+  parseNcmMetaJson: () => parseNcmMetaJson,
   qqAlbumCoverUrl: () => qqAlbumCoverUrl,
   renderCue: () => renderCue,
   safeName: () => safeName,
@@ -6580,6 +6584,183 @@ function sniffAudio(header) {
   if (t(4, 4) === "ftyp") return t(8, 4) === "M4A " ? "m4a" : "mp4";
   return null;
 }
+
+// MusicBridge/vendor/music-download/unlock/ncm.ts
+var import_node_crypto = require("node:crypto");
+var CORE_KEY = Buffer.from("687a4852416d736f356b496e62617857", "hex");
+var META_KEY = Buffer.from("2331346c6a6b5f215c5d2630553c2728", "hex");
+function ncmError(kind, message) {
+  const e = new Error(message);
+  e.kind = kind;
+  return e;
+}
+function aesEcbDecrypt(key, data) {
+  const decipher = (0, import_node_crypto.createDecipheriv)("aes-128-ecb", key, null);
+  decipher.setAutoPadding(true);
+  return Buffer.concat([decipher.update(data), decipher.final()]);
+}
+function decryptNcmKeyBlock(data) {
+  const copy = Buffer.from(data);
+  for (let index = 0; index < copy.length; index += 1) {
+    copy[index] ^= 100;
+  }
+  const plain = aesEcbDecrypt(CORE_KEY, copy);
+  if (plain.length < 17 || plain.subarray(0, 17).toString("utf8") !== "neteasecloudmusic") {
+    throw ncmError("key", "NCM \u5BC6\u94A5\u6BB5\u65E0\u6548");
+  }
+  return plain.subarray(17);
+}
+function decryptNcmMetaBlock(data) {
+  const plain = aesEcbDecrypt(META_KEY, data);
+  if (plain.length < 6 || plain.subarray(0, 6).toString("utf8") !== "music:") {
+    throw ncmError("format", "NCM \u5143\u6570\u636E\u65E0\u6548");
+  }
+  return plain.subarray(6);
+}
+var NcmRc4 = class _NcmRc4 {
+  stream;
+  index = 0;
+  constructor(key) {
+    this.stream = _NcmRc4.prga(_NcmRc4.ksa(key));
+  }
+  static ksa(key) {
+    const state = new Uint8Array(256);
+    for (let index = 0; index < 256; index += 1) {
+      state[index] = index;
+    }
+    let j = 0;
+    for (let index = 0; index < 256; index += 1) {
+      j = j + state[index] + key[index % key.length] & 255;
+      const tmp = state[index];
+      state[index] = state[j];
+      state[j] = tmp;
+    }
+    return state;
+  }
+  static prga(state) {
+    const out = new Uint8Array(256);
+    for (let index = 0; index < 256; index += 1) {
+      const key1 = index + 1 & 255;
+      const key2 = key1 + state[key1] & 255;
+      const at = state[key1] + state[key2] & 255;
+      out[index] = state[at];
+    }
+    return out;
+  }
+  decrypt(buf) {
+    for (let index = 0; index < buf.length; index += 1) {
+      buf[index] ^= this.stream[this.index % 256];
+      this.index += 1;
+    }
+  }
+};
+function readLen(buf, pos) {
+  if (pos + 4 > buf.length) {
+    throw ncmError("format", "NCM \u6587\u4EF6\u8FC7\u77ED");
+  }
+  return { value: readUInt32LE(buf, pos), next: pos + 4 };
+}
+function readFrame(buf, pos) {
+  const { value: length, next } = readLen(buf, pos);
+  if (length === 0) {
+    return { data: Buffer.alloc(0), next };
+  }
+  const end = next + length;
+  if (end > buf.length) {
+    throw ncmError("format", "NCM \u5E27\u957F\u5EA6\u8D85\u51FA\u6587\u4EF6");
+  }
+  return { data: buf.subarray(next, end), next: end };
+}
+function sniffImageMime(data) {
+  if (data.length >= 8 && data[0] === 137 && data[1] === 80) {
+    return "image/png";
+  }
+  return "image/jpeg";
+}
+function extFromMeta(format, header) {
+  const normalized = String(format || "").toLowerCase();
+  if (normalized === "flac" || normalized === "mp3" || normalized === "m4a" || normalized === "ogg") {
+    return normalized;
+  }
+  return sniffAudio(header) || "mp3";
+}
+function parseNcmMetaJson(raw) {
+  try {
+    const json = JSON.parse(Buffer.from(raw).toString("utf8"));
+    const artists = Array.isArray(json.artist) ? json.artist : [];
+    const names = artists.map((entry) => Array.isArray(entry) ? String(entry[0] || "") : "").filter(Boolean);
+    return {
+      musicId: typeof json.musicId === "number" ? json.musicId : Number(json.musicId) || void 0,
+      musicName: typeof json.musicName === "string" ? json.musicName : void 0,
+      artist: names.join(" / ") || void 0,
+      album: typeof json.album === "string" ? json.album : void 0,
+      format: typeof json.format === "string" ? json.format : void 0,
+      albumPic: typeof json.albumPic === "string" ? json.albumPic : void 0,
+      duration: typeof json.duration === "number" ? json.duration : void 0
+    };
+  } catch {
+    return void 0;
+  }
+}
+function decryptNcmFile(file) {
+  const buffer = Buffer.from(file);
+  if (buffer.length < 10 || buffer.toString("ascii", 0, 8) !== "CTENFDAM") {
+    throw ncmError("format", "\u4E0D\u662F\u6709\u6548\u7684 NCM \u6587\u4EF6\uFF08\u7F3A\u5C11 CTENFDAM \u5934\uFF09");
+  }
+  let pos = 10;
+  const keyFrame = readFrame(buffer, pos);
+  pos = keyFrame.next;
+  const rc4Key = decryptNcmKeyBlock(keyFrame.data);
+  const commentFrame = readFrame(buffer, pos);
+  pos = commentFrame.next;
+  let metaRaw;
+  if (commentFrame.data.length > 0) {
+    const comment = Buffer.from(commentFrame.data);
+    for (let index = 0; index < comment.length; index += 1) {
+      comment[index] ^= 99;
+    }
+    const prefix = "163 key(Don't modify):";
+    if (comment.length < prefix.length || comment.toString("utf8", 0, prefix.length) !== prefix) {
+      throw ncmError("format", "NCM comment \u6BB5\u65E0\u6548");
+    }
+    const encoded = comment.toString("utf8", prefix.length);
+    const packed = Buffer.from(encoded, "base64");
+    metaRaw = decryptNcmMetaBlock(packed);
+  }
+  pos += 5;
+  const { value: imageOffset, next: afterOffset } = readLen(buffer, pos);
+  pos = afterOffset;
+  const imageFrame = readFrame(buffer, pos);
+  pos = imageFrame.next;
+  if (imageOffset > imageFrame.data.length) {
+    pos += imageOffset - imageFrame.data.length;
+  }
+  if (pos > buffer.length) {
+    throw ncmError("format", "NCM \u5C01\u9762\u504F\u79FB\u975E\u6CD5");
+  }
+  const audioEncrypted = buffer.subarray(pos);
+  if (audioEncrypted.length < 12) {
+    throw ncmError("format", "NCM \u97F3\u9891\u6BB5\u8FC7\u77ED");
+  }
+  const rc4 = new NcmRc4(rc4Key);
+  const head = Uint8Array.from(audioEncrypted.subarray(0, 12));
+  rc4.decrypt(head);
+  const ext = extFromMeta(parseNcmMetaJson(metaRaw || new Uint8Array())?.format, head);
+  if (!sniffAudio(head) && ext === "mp3") {
+    throw ncmError("cipher", "\u65E0\u6CD5\u8BC6\u522B\u89E3\u5BC6\u540E\u7684\u97F3\u9891\u683C\u5F0F");
+  }
+  const audio = Uint8Array.from(audioEncrypted.subarray(12));
+  rc4.decrypt(audio);
+  const full = new Uint8Array(head.length + audio.length);
+  full.set(head, 0);
+  full.set(audio, head.length);
+  const meta = metaRaw ? parseNcmMetaJson(metaRaw) : void 0;
+  let cover;
+  if (imageFrame.data.length > 0) {
+    cover = { data: Uint8Array.from(imageFrame.data), mime: sniffImageMime(imageFrame.data) };
+  }
+  return { audio: full, ext, meta, cover };
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   AlbumPackager,
@@ -6592,6 +6773,9 @@ function sniffAudio(header) {
   albumRootDir,
   albumTrackDir,
   cdnFallbackUrls,
+  decryptNcmFile,
+  decryptNcmKeyBlock,
+  decryptNcmMetaBlock,
   decryptQmcFile,
   discOf,
   downloadFile,
@@ -6602,6 +6786,7 @@ function sniffAudio(header) {
   mkBundle,
   normalizeDate,
   parseLrcLine,
+  parseNcmMetaJson,
   qqAlbumCoverUrl,
   renderCue,
   safeName,

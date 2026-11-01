@@ -5,7 +5,8 @@
 （队列、限速、直链落盘、网易云 CDN 节点替换、歌词合并、专辑目录 / cue、
 MP3 / FLAC 标签、QQ 音乐加密文件解密）。
 
-解密算法移植自 [UnlockMusicProject_Archive](https://github.com/showhwa/UnlockMusicProject_Archive)。
+解密算法移植自 [UnlockMusicProject_Archive](https://github.com/showhwa/UnlockMusicProject_Archive)（QQ QMC）
+与 [ncmc](https://github.com/magic-akari/ncmc)（网易云 `.ncm` 容器，MIT）。
 MP3 标签通过 [node-id3](https://github.com/Zazama/node-id3)（MIT）写入，已打进 `core.cjs`。
 
 Rhine 不使用该项目的 Electron / Vue 界面。登录、搜索和歌单仍走 Rhine 自己的桥接；

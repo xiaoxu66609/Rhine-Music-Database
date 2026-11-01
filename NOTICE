@@ -196,6 +196,7 @@ https://github.com/xiaoxu66609/music-download （Rhine 内路径 `MusicBridge/ve
 Electron/Vue 界面，仅复用主进程下载逻辑；固定来源与重新生成步骤见 `MusicBridge/vendor/music-download/SOURCE.md`。
 
 QQ 加密解密算法移植自 UnlockMusicProject_Archive（https://github.com/showhwa/UnlockMusicProject_Archive ）。
+网易云 `.ncm` 容器解密参考 ncmc（https://github.com/magic-akari/ncmc ，MIT），与 ncmdump 系格式一致。
 MP3 内嵌标签通过 node-id3（https://github.com/Zazama/node-id3 ，MIT）写入，已编入 `core.cjs` bundle，
 不单独随包分发 node_modules。
 

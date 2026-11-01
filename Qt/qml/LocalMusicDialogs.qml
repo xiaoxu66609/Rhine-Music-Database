@@ -46,9 +46,9 @@ Item {
             when: Qt.platform.os === "windows"
             value: dialogs.hostWindow
         }
-        title: "选择 QQ 音乐加密文件"
+        title: "选择加密音乐文件"
         fileMode: FileDialog.OpenFiles
-        nameFilters: ["QQ 音乐加密文件 (*.mflac *.mflac0 *.mgg *.mgg0 *.mgg1 *.qmc0 *.qmcflac *.qmcogg)"]
+        nameFilters: ["QQ 音乐加密 / 网易云 NCM (*.mflac *.mflac0 *.mgg *.mgg0 *.mgg1 *.qmc0 *.qmcflac *.qmcogg *.ncm)"]
         onAccepted: backend.decryptLocal(selectedFiles)
     }
     Connections {

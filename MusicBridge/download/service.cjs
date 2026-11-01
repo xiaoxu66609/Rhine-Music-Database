@@ -8,6 +8,8 @@ const NE_LADDER = ['flac', '320', '128'];
 const QUALITIES = new Set(QQ_LADDER);
 const LYRIC_MODES = new Set(['both', 'embed', 'lrc', 'none']);
 const QMC_EXTS = new Set(['.mflac', '.mflac0', '.mgg', '.mgg0', '.mgg1', '.qmc0', '.qmcflac', '.qmcogg']);
+const NCM_EXTS = new Set(['.ncm']);
+const UNLOCK_EXTS = new Set([...QMC_EXTS, ...NCM_EXTS]);
 const EXT_OF = { flac: 'flac', ape: 'ape', 320: 'mp3', 128: 'mp3', m4a: 'm4a' };
 
 const settings = {
@@ -772,6 +774,142 @@ function startUnlock(params, cookies) {
     return ok(snapshot());
 }
 
+function trackFromNcmMeta(meta) {
+    if (!meta || !meta.musicId) {
+        return null;
+    }
+    return {
+        id: String(meta.musicId),
+        name: meta.musicName || '未命名',
+        artist: meta.artist || '未知歌手',
+        album: meta.album || '',
+        cover: meta.albumPic || '',
+    };
+}
+
+async function tagUnlockOutput(job, outputPath, ext, track, source, cookies, coverOverride) {
+    const normalized = String(ext || '').replace(/^\./, '').toLowerCase();
+    if (normalized !== 'mp3' && normalized !== 'flac') {
+        job.state = 'done';
+        job.progress = 100;
+        job.error = '';
+        return;
+    }
+    const lyricMode = settings.lyricMode;
+    const lyrics = lyricMode === 'none' ? '' : await fetchLyrics({ source, track }, cookies);
+    const embed = lyricMode === 'both' || lyricMode === 'embed';
+    let cover = coverOverride;
+    if (!cover && track.cover) {
+        cover = await fetchCover(track.cover);
+    }
+    await core.tagFile(
+        outputPath,
+        {
+            title: track.name,
+            artist: track.artist,
+            album: track.album || '未知专辑',
+            date: track.date || '',
+            copyright: '',
+            genre: '',
+            lyrics: embed ? lyrics : '',
+            cover: cover?.data,
+            coverMime: cover?.mime,
+        },
+        { saveLrc: false },
+    );
+    if ((lyricMode === 'both' || lyricMode === 'lrc') && lyrics) {
+        fs.writeFileSync(outputPath.slice(0, -(ext.length + 1)) + '.lrc', lyrics, 'utf8');
+    }
+    job.state = 'done';
+    job.progress = 100;
+    job.error = '';
+}
+
+async function processQmcUnlock(job, file, outDir, cookies) {
+    const ext = path.extname(file).toLowerCase();
+    const base = path.basename(file);
+    let decrypted;
+    try {
+        decrypted = core.decryptQmcFile(fs.readFileSync(file));
+    } catch (error) {
+        job.state = 'failed';
+        job.error = error instanceof Error ? error.message : String(error);
+        return;
+    }
+    const stem = base.slice(0, -ext.length);
+    let track = null;
+    if (decrypted.ext === 'flac' || decrypted.ext === 'mp3') {
+        try {
+            track = await searchQq(stem, cookiesFor('qq', cookies, 'account'));
+        } catch {
+            track = null;
+        }
+    }
+    const outName = track
+        ? `${core.safeName(track.name)} - ${core.safeName(track.artist)}.${decrypted.ext}`
+        : `${core.safeName(stem)}.${decrypted.ext}`;
+    const outputPath = core.uniquePath(path.join(outDir, outName));
+    fs.writeFileSync(outputPath, decrypted.audio);
+    job.outputPath = outputPath;
+    job.track = track || { name: stem, artist: '' };
+    job.title = job.track.name;
+    job.artist = job.track.artist || '';
+    if (!track) {
+        job.state = 'done';
+        job.progress = 100;
+        job.error = '搜索未命中，仅解密';
+        return;
+    }
+    try {
+        await tagUnlockOutput(job, outputPath, decrypted.ext, track, 'qq', cookies);
+    } catch (error) {
+        job.state = 'done';
+        job.progress = 100;
+        job.error = `补全失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+}
+
+async function processNcmUnlock(job, file, outDir, cookies) {
+    const base = path.basename(file);
+    let decrypted;
+    try {
+        decrypted = core.decryptNcmFile(fs.readFileSync(file));
+    } catch (error) {
+        job.state = 'failed';
+        job.error = error instanceof Error ? error.message : String(error);
+        return;
+    }
+    const ext = String(decrypted.ext || 'mp3').replace(/^\./, '');
+    const metaTrack = trackFromNcmMeta(decrypted.meta);
+    const stem = base.slice(0, -4);
+    const track = metaTrack || { id: '', name: stem, artist: '', album: '' };
+    const outName = metaTrack
+        ? `${core.safeName(metaTrack.name)} - ${core.safeName(metaTrack.artist)}.${ext}`
+        : `${core.safeName(stem)}.${ext}`;
+    const outputPath = core.uniquePath(path.join(outDir, outName));
+    fs.writeFileSync(outputPath, decrypted.audio);
+    job.outputPath = outputPath;
+    job.track = track;
+    job.title = track.name;
+    job.artist = track.artist || '';
+    if (!metaTrack) {
+        job.state = 'done';
+        job.progress = 100;
+        job.error = '元数据缺失，仅解密';
+        return;
+    }
+    const embeddedCover = decrypted.cover
+        ? { data: decrypted.cover.data, mime: decrypted.cover.mime }
+        : undefined;
+    try {
+        await tagUnlockOutput(job, outputPath, ext, track, 'netease', cookies, embeddedCover);
+    } catch (error) {
+        job.state = 'done';
+        job.progress = 100;
+        job.error = `补全失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+}
+
 async function processUnlock(batch, cookies) {
     const outDir = settings.decryptDir || settings.downloadDir;
     fs.mkdirSync(outDir, { recursive: true });
@@ -779,74 +917,15 @@ async function processUnlock(batch, cookies) {
         const file = job.file;
         job.state = 'running';
         const ext = path.extname(file).toLowerCase();
-        const base = path.basename(file);
-        if (!QMC_EXTS.has(ext)) {
+        if (!UNLOCK_EXTS.has(ext)) {
             job.state = 'failed';
             job.error = `不支持的扩展名 ${ext || '（无）'}`;
             continue;
         }
-        let decrypted;
-        try {
-            decrypted = core.decryptQmcFile(fs.readFileSync(file));
-        } catch (error) {
-            job.state = 'failed';
-            job.error = error instanceof Error ? error.message : String(error);
-            continue;
-        }
-        const stem = base.slice(0, -ext.length);
-        let track = null;
-        if (decrypted.ext === 'flac' || decrypted.ext === 'mp3') {
-            try {
-                track = await searchQq(stem, cookiesFor('qq', cookies, 'account'));
-            } catch {
-                track = null;
-            }
-        }
-        const outName = track
-            ? `${core.safeName(track.name)} - ${core.safeName(track.artist)}.${decrypted.ext}`
-            : `${core.safeName(stem)}.${decrypted.ext}`;
-        const outputPath = core.uniquePath(path.join(outDir, outName));
-        fs.writeFileSync(outputPath, decrypted.audio);
-        job.outputPath = outputPath;
-        job.track = track || { name: stem, artist: '' };
-        job.title = job.track.name;
-        job.artist = job.track.artist || '';
-        if (!track) {
-            job.state = 'done';
-            job.progress = 100;
-            job.error = '搜索未命中，仅解密';
-            continue;
-        }
-        try {
-            const lyricMode = settings.lyricMode;
-            const lyrics = lyricMode === 'none' ? '' : await fetchLyrics({ source: 'qq', track }, cookies);
-            const embed = lyricMode === 'both' || lyricMode === 'embed';
-            const cover = await fetchCover(track.cover);
-            await core.tagFile(
-                outputPath,
-                {
-                    title: track.name,
-                    artist: track.artist,
-                    album: track.album || '未知专辑',
-                    date: track.date || '',
-                    copyright: '',
-                    genre: '',
-                    lyrics: embed ? lyrics : '',
-                    cover: cover?.data,
-                    coverMime: cover?.mime,
-                },
-                { saveLrc: false },
-            );
-            if ((lyricMode === 'both' || lyricMode === 'lrc') && lyrics) {
-                fs.writeFileSync(outputPath.slice(0, -(decrypted.ext.length + 1)) + '.lrc', lyrics, 'utf8');
-            }
-            job.state = 'done';
-            job.progress = 100;
-            job.error = '';
-        } catch (error) {
-            job.state = 'done';
-            job.progress = 100;
-            job.error = `补全失败：${error instanceof Error ? error.message : String(error)}`;
+        if (NCM_EXTS.has(ext)) {
+            await processNcmUnlock(job, file, outDir, cookies);
+        } else {
+            await processQmcUnlock(job, file, outDir, cookies);
         }
     }
 }
