@@ -117,7 +117,8 @@ void NativeHud::setQuery(QString value) {
                 return;
             }
             owner->m_music->search(value);
-            if (owner->m_music->provider == "netease" && !owner->m_host->fromLink(value).isEmpty()) {
+            if ((owner->m_music->provider == "netease" || owner->m_music->provider == "qq") &&
+                !owner->m_host->fromLink(value).isEmpty()) {
                 owner->closeModal();
             }
         });
@@ -915,6 +916,26 @@ void NativeHud::downloadAction(const QString &action) {
         emit downloadDecryptRequested();
         return;
     }
+    if (action == "decrypt-folder") {
+        emit downloadDecryptFolderRequested();
+        return;
+    }
+    if (action == "decrypt-directory") {
+        emit downloadDecryptDirectoryRequested();
+        return;
+    }
+    if (action == "selected") {
+        downloads.enqueueSelected(music.downloadPickedTracks());
+        openModal("downloads");
+        return;
+    }
+    if (action.startsWith("pick:")) {
+        const int index = action.mid(5).toInt();
+        if (music.directory && index >= 0 && index < music.directory->songs.size()) {
+            music.toggleDownloadPick(music.directory->songs.at(index).toObject()["id"].toString());
+        }
+        return;
+    }
     if (action == "song") {
         downloads.enqueueCurrent();
         openModal("downloads");
@@ -957,5 +978,9 @@ void NativeHud::downloadAction(const QString &action) {
     }
     if (action.startsWith("retry:")) {
         downloads.retry(action.mid(6));
+        return;
+    }
+    if (action.startsWith("reveal:")) {
+        downloads.revealJob(action.mid(7));
     }
 }

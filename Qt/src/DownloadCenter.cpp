@@ -2,12 +2,14 @@
 #include "Host.h"
 #include "MusicLibrary.h"
 #include <algorithm>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QPointer>
 #include <QSet>
 #include <QStandardPaths>
+#include <QUrl>
 
 namespace {
 const QStringList kQualities{"flac", "ape", "320", "128", "m4a"};
@@ -83,12 +85,46 @@ QString DownloadCenter::lyricLabel() const {
 }
 
 QString DownloadCenter::identity() const {
-    return m_host->preference("download-identity") == "anon" ? QStringLiteral("anon")
-                                                             : QStringLiteral("account");
+    if (m_library->provider == "qq") {
+        return qqIdentity();
+    }
+    if (m_library->provider == "netease" || m_library->provider == "kugou") {
+        return neIdentity();
+    }
+    const auto saved = m_host->preference("download-identity");
+    return saved == "anon" ? QStringLiteral("anon") : QStringLiteral("account");
+}
+
+QString DownloadCenter::qqIdentity() const {
+    const auto saved = m_host->preference("download-qq-identity");
+    if (saved == "anon" || saved == "account") {
+        return saved;
+    }
+    const auto legacy = m_host->preference("download-identity");
+    return legacy == "anon" ? QStringLiteral("anon") : QStringLiteral("account");
+}
+
+QString DownloadCenter::neIdentity() const {
+    const auto saved = m_host->preference("download-ne-identity");
+    if (saved == "anon" || saved == "account") {
+        return saved;
+    }
+    const auto legacy = m_host->preference("download-identity");
+    return legacy == "anon" ? QStringLiteral("anon") : QStringLiteral("account");
 }
 
 QString DownloadCenter::identityLabel() const {
-    return identity() == "anon" ? QStringLiteral("匿名") : QStringLiteral("登录账户");
+    const auto label = identity() == "anon" ? QStringLiteral("匿名") : QStringLiteral("登录账户");
+    if (m_library->provider == "qq") {
+        return label + QStringLiteral(" · QQ");
+    }
+    if (m_library->provider == "netease") {
+        return label + QStringLiteral(" · 网易");
+    }
+    if (m_library->provider == "kugou") {
+        return label + QStringLiteral(" · 酷狗");
+    }
+    return label;
 }
 
 int DownloadCenter::concurrency() const {
@@ -112,6 +148,11 @@ QString DownloadCenter::directory() const {
     return QDir(music).filePath(QStringLiteral("Rhine"));
 }
 
+QString DownloadCenter::decryptDirectory() const {
+    const auto saved = m_host->preference("download-decrypt-dir").trimmed();
+    return saved.isEmpty() ? directory() : saved;
+}
+
 void DownloadCenter::cycleQuality() {
     const auto options =
         (m_library->provider == "netease" || m_library->provider == "kugou") ? kStreaming : kQualities;
@@ -130,8 +171,24 @@ void DownloadCenter::cycleLyric() {
 }
 
 void DownloadCenter::cycleIdentity() {
-    m_host->setPreference("download-identity", identity() == "anon" ? "account" : "anon");
+    if (m_library->provider == "qq") {
+        m_host->setPreference("download-qq-identity", qqIdentity() == "anon" ? "account" : "anon");
+    } else if (m_library->provider == "netease" || m_library->provider == "kugou") {
+        m_host->setPreference("download-ne-identity", neIdentity() == "anon" ? "account" : "anon");
+    } else {
+        m_host->setPreference("download-identity", identity() == "anon" ? "account" : "anon");
+    }
     m_library->changed();
+}
+
+void DownloadCenter::setDecryptDirectory(const QString &path) {
+    const auto clean = QFileInfo(path).absoluteFilePath();
+    if (clean.isEmpty()) {
+        return;
+    }
+    m_host->setPreference("download-decrypt-dir", clean);
+    m_library->status = QStringLiteral("解密输出目录已改为 ") + clean;
+    post("downloadConfigure", {});
 }
 
 void DownloadCenter::cycleConcurrency() {
@@ -170,9 +227,12 @@ QString DownloadCenter::providerRoute() const {
 
 QJsonObject DownloadCenter::settingsObject() const {
     return {{"downloadDir", directory()},
+            {"decryptDir", decryptDirectory()},
             {"quality", quality()},
             {"lyricMode", lyricMode()},
             {"identity", identity()},
+            {"qqIdentity", qqIdentity()},
+            {"neIdentity", neIdentity()},
             {"concurrency", concurrency()}};
 }
 
@@ -339,6 +399,48 @@ void DownloadCenter::enqueueLoaded() {
     int total = 0;
     const auto tracks = loadedTracks(&albumMode, &album, &loaded, &total);
     enqueue(tracks, albumMode ? album : QJsonObject{});
+}
+
+void DownloadCenter::enqueueSelected(const QJsonArray &tracks) {
+    enqueue(tracks, QJsonObject{});
+    m_library->clearDownloadPicks();
+}
+
+void DownloadCenter::revealJob(const QString &id) {
+    for (const auto &value : jobs) {
+        const auto job = value.toObject();
+        if (job["id"].toString() != id) {
+            continue;
+        }
+        const auto output = job["outputPath"].toString();
+        if (output.isEmpty()) {
+            notice = QStringLiteral("该任务没有输出路径");
+            m_library->changed();
+            return;
+        }
+        const auto folder = QFileInfo(output).absolutePath();
+        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(folder))) {
+            notice = QStringLiteral("无法打开文件夹");
+            m_library->changed();
+            return;
+        }
+        notice.clear();
+        m_library->changed();
+        return;
+    }
+}
+
+void DownloadCenter::unlockDirectories(const QStringList &paths) {
+    if (paths.isEmpty()) {
+        return;
+    }
+    QJsonArray dirs;
+    for (const auto &path : paths) {
+        dirs.append(path);
+    }
+    m_library->status =
+        QStringLiteral("正在扫描并解密 ") + QString::number(paths.size()) + QStringLiteral(" 个文件夹");
+    post("downloadUnlock", {{"directories", dirs}});
 }
 
 void DownloadCenter::cancel(const QString &id) {

@@ -368,8 +368,8 @@ void MusicLibrary::search(QString text, QString kind, bool more) {
         searchLocal(text, kind);
         return;
     }
-    const auto link = provider == "netease" && !more ? host->fromLink(text) : QString();
-    if (!link.isEmpty()) {
+    const auto link = !more ? host->fromLink(text) : QString();
+    if (!link.isEmpty() && (provider == "netease" || provider == "qq")) {
         const auto type = link.section(':', 0, 0);
         const auto value = MusicData::item(type, link.section(':', 1));
         ++m_generation;
@@ -1012,4 +1012,44 @@ QString MusicLibrary::sourceURL(QJsonObject value) const {
                                         {"playlist", value["chart"].toBool() ? "toplist" : "playlist"}};
     return "https://y.qq.com/n/ryqq/" + paths.value(value["kind"].toString()) + "/" +
            QString::fromLatin1(QUrl::toPercentEncoding(value["id"].toString(), "!'()*"));
+}
+
+void MusicLibrary::toggleDownloadPick(const QString &id) {
+    if (id.isEmpty()) {
+        return;
+    }
+    if (downloadPickIds.contains(id)) {
+        downloadPickIds.remove(id);
+    } else {
+        downloadPickIds.insert(id);
+    }
+    changed();
+}
+
+void MusicLibrary::clearDownloadPicks() {
+    if (downloadPickIds.isEmpty()) {
+        return;
+    }
+    downloadPickIds.clear();
+    changed();
+}
+
+QJsonArray MusicLibrary::downloadPickedTracks() const {
+    QJsonArray picked;
+    QJsonArray songs;
+    if (directory) {
+        songs = directory->orderedSongs();
+    } else {
+        songs = tracks;
+    }
+    for (const auto &value : songs) {
+        const auto song = value.toObject();
+        if (song["kind"].toString() != "song" || song["deferred"].toBool()) {
+            continue;
+        }
+        if (downloadPickIds.contains(song["id"].toString())) {
+            picked.append(song);
+        }
+    }
+    return picked;
 }

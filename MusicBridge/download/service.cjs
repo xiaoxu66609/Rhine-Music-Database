@@ -19,6 +19,8 @@ const settings = {
     lyricMode: 'both',
     concurrency: 2,
     identity: 'account',
+    qqIdentity: 'account',
+    neIdentity: 'account',
 };
 
 const jobs = [];
@@ -57,6 +59,14 @@ function applySettings(patch) {
     }
     if (patch.identity === 'account' || patch.identity === 'anon') {
         settings.identity = patch.identity;
+        settings.qqIdentity = patch.identity;
+        settings.neIdentity = patch.identity;
+    }
+    if (patch.qqIdentity === 'account' || patch.qqIdentity === 'anon') {
+        settings.qqIdentity = patch.qqIdentity;
+    }
+    if (patch.neIdentity === 'account' || patch.neIdentity === 'anon') {
+        settings.neIdentity = patch.neIdentity;
     }
     const concurrency = Number(patch.concurrency);
     if (Number.isFinite(concurrency)) {
@@ -118,7 +128,76 @@ function snapshot() {
             lyricMode: settings.lyricMode,
             concurrency: settings.concurrency,
             identity: settings.identity,
+            qqIdentity: settings.qqIdentity,
+            neIdentity: settings.neIdentity,
         },
+    };
+}
+
+function resolveIdentity(provider, params) {
+    if (provider === 'qq') {
+        if (params.qqIdentity === 'anon' || params.qqIdentity === 'account') {
+            return params.qqIdentity;
+        }
+        if (params.identity === 'anon' || params.identity === 'account') {
+            return params.identity;
+        }
+        return settings.qqIdentity;
+    }
+    if (provider === 'netease' || provider === 'kugou') {
+        if (params.neIdentity === 'anon' || params.neIdentity === 'account') {
+            return params.neIdentity;
+        }
+        if (params.identity === 'anon' || params.identity === 'account') {
+            return params.identity;
+        }
+        return settings.neIdentity;
+    }
+    return settings.qqIdentity;
+}
+
+const QQ_SIZE_KEYS = [
+    ['flac', 'flac'],
+    ['ape', 'ape'],
+    ['mp3_320', '320'],
+    ['mp3_128', '128'],
+    ['m4a', 'm4a'],
+];
+
+function availableQqTiers(sizes) {
+    if (!sizes || typeof sizes !== 'object') {
+        return null;
+    }
+    const tiers = QQ_SIZE_KEYS.filter(([key]) => Number(sizes[key] ?? 0) > 0).map(([, quality]) => quality);
+    return tiers.length ? tiers : null;
+}
+
+function describeQqTiers(sizes) {
+    if (!sizes || typeof sizes !== 'object') {
+        return '';
+    }
+    const labels = {
+        flac: '无损 FLAC',
+        ape: 'APE',
+        mp3_320: '320k',
+        mp3_128: '128k',
+        m4a: 'm4a',
+    };
+    const parts = QQ_SIZE_KEYS.filter(([key]) => Number(sizes[key] ?? 0) > 0).map(([key]) => labels[key]);
+    return parts.join(' / ');
+}
+
+function qqSizesFromTrackInfo(info) {
+    const file = info?.file;
+    if (!file || typeof file !== 'object') {
+        return null;
+    }
+    return {
+        flac: file.size_flac,
+        ape: file.size_ape,
+        mp3_320: file.size_320mp3,
+        mp3_128: file.size_128mp3,
+        m4a: file.size_96aac,
     };
 }
 
@@ -286,7 +365,31 @@ function playEntry(body, id) {
 
 async function resolveQq(track, preferred, cookies) {
     const target = QQ_LADDER.includes(preferred) ? preferred : 'flac';
-    const order = QQ_LADDER.slice(QQ_LADDER.indexOf(target));
+    let order = QQ_LADDER.slice(QQ_LADDER.indexOf(target));
+    let tierSizes = null;
+    try {
+        const response = await dispatchRequest({
+            route: '/qq/getSongInfo',
+            params: { songmid: track.id },
+            cookies,
+        });
+        const body = response?.body || {};
+        const info =
+            body?.songinfo?.data?.track_info ||
+            body?.data?.track_info ||
+            body?.track_info ||
+            null;
+        tierSizes = qqSizesFromTrackInfo(info);
+        const available = availableQqTiers(tierSizes);
+        if (available?.length) {
+            order = order.filter((quality) => available.includes(quality));
+            if (!order.length) {
+                order = available;
+            }
+        }
+    } catch {
+        /* 详情取不到时退回全档尝试 */
+    }
     let last = '';
     for (const quality of order) {
         await rateLimiter.wait();
@@ -315,12 +418,14 @@ async function resolveQq(track, preferred, cookies) {
             '';
     }
     if (track.vip || track.vipQuality) {
+        const tierHint = describeQqTiers(tierSizes);
         throw new Error(
-            `付费/会员歌曲下载不了：当前账号无该曲下载权限（需 QQ 音乐绿钻/豪华绿钻或单独购买）${last ? `；${last}` : ''}`,
+            `付费/会员歌曲下载不了：当前账号无该曲下载权限（需 QQ 音乐绿钻/豪华绿钻或单独购买）${tierHint ? `；登记档位：${tierHint}` : ''}${last ? `；${last}` : ''}`,
         );
     }
+    const tierHint = describeQqTiers(tierSizes);
     throw new Error(
-        `该曲未拿到可播放 URL：服务端未提供任何档位的下载直链（与所选档位无关，多因版权方未开放下载、仅授权在线试听）${last ? `；${last}` : ''}`,
+        `该曲未拿到可播放 URL：服务端未提供任何档位的下载直链（与所选档位无关，多因版权方未开放下载、仅授权在线试听）${tierHint ? `；登记档位：${tierHint}` : ''}${last ? `；${last}` : ''}`,
     );
 }
 
@@ -662,8 +767,7 @@ function enqueue(provider, params, cookies) {
     }
     const quality = QUALITIES.has(params.quality) ? params.quality : settings.quality;
     const lyricMode = LYRIC_MODES.has(params.lyricMode) ? params.lyricMode : settings.lyricMode;
-    const identity =
-        params.identity === 'anon' || params.identity === 'account' ? params.identity : settings.identity;
+    const identity = resolveIdentity(provider, params);
     const album = albumMode ? makeBundle(params.album, tracks) : undefined;
     const created = [];
     for (const track of tracks) {
@@ -750,9 +854,63 @@ async function searchQq(fileBase, cookies) {
     return normalizeTrack(item, 0, false);
 }
 
+function collectUnlockPaths(files, directories) {
+    const paths = [];
+    const seen = new Set();
+    const add = (file) => {
+        const resolved = path.resolve(String(file));
+        if (seen.has(resolved)) {
+            return;
+        }
+        seen.add(resolved);
+        paths.push(resolved);
+    };
+    for (const file of files) {
+        add(file);
+    }
+    const walk = (dir) => {
+        let entries;
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            return;
+        }
+        for (const entry of entries) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                walk(full);
+            } else if (entry.isFile()) {
+                const ext = path.extname(entry.name).toLowerCase();
+                if (UNLOCK_EXTS.has(ext)) {
+                    add(full);
+                }
+            }
+            if (paths.length >= 500) {
+                return;
+            }
+        }
+    };
+    for (const dir of directories) {
+        const root = path.resolve(String(dir));
+        try {
+            if (fs.statSync(root).isDirectory()) {
+                walk(root);
+            }
+        } catch {
+            /* 跳过不可读目录 */
+        }
+        if (paths.length >= 500) {
+            break;
+        }
+    }
+    return paths;
+}
+
 function startUnlock(params, cookies) {
     applySettings(params.settings);
-    const files = Array.isArray(params.files) ? params.files.map((file) => String(file)) : [];
+    const rawFiles = Array.isArray(params.files) ? params.files.map((file) => String(file)) : [];
+    const rawDirs = Array.isArray(params.directories) ? params.directories.map((file) => String(file)) : [];
+    const files = collectUnlockPaths(rawFiles, rawDirs);
     if (!files.length) {
         return fail('没有选择文件');
     }

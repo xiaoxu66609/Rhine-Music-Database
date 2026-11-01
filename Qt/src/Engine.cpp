@@ -48,6 +48,9 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
     connect(&app->hud, &NativeHud::localImportRequested, this, &Engine::localImportRequested);
     connect(&app->hud, &NativeHud::downloadDirectoryRequested, this, &Engine::downloadDirectoryRequested);
     connect(&app->hud, &NativeHud::downloadDecryptRequested, this, &Engine::downloadDecryptRequested);
+    connect(&app->hud, &NativeHud::downloadDecryptFolderRequested, this, &Engine::downloadDecryptFolderRequested);
+    connect(&app->hud, &NativeHud::downloadDecryptDirectoryRequested, this,
+            &Engine::downloadDecryptDirectoryRequested);
 #ifdef Q_OS_DARWIN
     renderConfiguration.initialize([this](const QString &key) { return host.preference(key); });
     connect(&host, &Host::preferenceChanged, this, [this](const QString &key, const QString &value) {
@@ -912,6 +915,14 @@ void Engine::setDownloadDirectory(QUrl url) {
     wake();
 }
 
+void Engine::setDecryptDirectory(QUrl url) {
+    if (!url.isLocalFile()) {
+        return;
+    }
+    app->music.downloads.setDecryptDirectory(url.toLocalFile());
+    wake();
+}
+
 void Engine::decryptLocal(QList<QUrl> urls) {
     QStringList paths;
     for (const auto &url : urls) {
@@ -921,5 +932,14 @@ void Engine::decryptLocal(QList<QUrl> urls) {
     }
     app->hud.openModal("downloads");
     app->music.downloads.unlockFiles(paths);
+    wake();
+}
+
+void Engine::decryptLocalFolder(QUrl url) {
+    if (!url.isLocalFile()) {
+        return;
+    }
+    app->hud.openModal("downloads");
+    app->music.downloads.unlockDirectories({url.toLocalFile()});
     wake();
 }

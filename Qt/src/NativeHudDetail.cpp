@@ -468,6 +468,19 @@ void NativeHud::container(double width, double opacity) {
         fill(downloadX, 339, 180, 44, {119.0 / 255, 123.0 / 255, 96.0 / 255, 1});
         hit(downloadX, 339, 180, 44, "download:loaded", downloadLabel);
         text(downloadLabel, downloadX + 22, 351, 16, "demibold", 0, {0.96, 0.95, 0.91, 1});
+        const int pickCount = music.downloadPickIds.size();
+        if (pickCount > 0) {
+            const double selectedX = downloadX + 190;
+            fill(selectedX, 339, 180, 44, {119.0 / 255, 123.0 / 255, 96.0 / 255, 1});
+            const auto selectedLabel = QStringLiteral("↓  下载选中 (") + QString::number(pickCount) + ")";
+            hit(selectedX, 339, 180, 44, "download:selected", selectedLabel);
+            text(selectedLabel, selectedX + 16, 351, 14, "demibold", 0, {0.96, 0.95, 0.91, 1});
+        }
+    }
+    if (!music.isLocal() && !albums) {
+        limited(QStringLiteral("下载 · ") + music.downloads.qualityLabel() + QStringLiteral(" · ") +
+                    music.downloads.lyricLabel() + QStringLiteral(" · ") + music.downloads.identityLabel(),
+                x, 405, 11, usable);
     }
     rule(x, 399, usable, 0.4);
     const auto titleX = x + 49;
@@ -493,6 +506,12 @@ void NativeHud::container(double width, double opacity) {
             fill(x - 8, yy, usable + 16, rowHeight - 2, color);
         }
         text(MusicData::pad(index + 1), x, yy + 16, 12);
+        if (!music.isLocal() && !albums) {
+            const auto songId = song["id"].toString();
+            const auto picked = music.downloadPickIds.contains(songId);
+            hit(x - 6, yy + 4, 28, 32, "download:pick:" + QString::number(rawIndex), picked ? "取消选中" : "选中下载");
+            text(picked ? "●" : "○", x + 2, yy + 12, 14, "demibold");
+        }
         limited(song["title"].toString(), titleX, yy + 12, 18, artistX - titleX - 22, "demibold");
         limited(song["artist"].toString(), artistX, yy + 16, 12, albumX - artistX - 20);
         limited(song["album"].toString(), albumX, yy + 16, 12, timeX - albumX - 18);
@@ -513,7 +532,7 @@ void NativeHud::container(double width, double opacity) {
         limited(music.directoryLoading || music.detailLoading ? "正在载入曲目…" : "暂无可读取曲目", titleX,
                 490, 22, usable - 100);
     }
-    QString hint = "滚轮浏览曲目 · 点击查看歌曲";
+    QString hint = "滚轮浏览曲目 · 点击查看歌曲 · ○ 选中后批量下载";
     if (m_sortRequest) {
         hint = "正在补齐曲目以排序…";
     } else if (!m_sortNotice.isEmpty()) {

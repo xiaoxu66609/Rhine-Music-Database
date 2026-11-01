@@ -520,6 +520,8 @@ void NativeHud::downloadPanel(double x, double y, double width) {
             button("取消", left + usable - 90, yy, 90, 40, "download:cancel:" + job["id"].toString(), 14);
         } else if (state == "failed" || state == "cancelled") {
             button("重试", left + usable - 90, yy, 90, 40, "download:retry:" + job["id"].toString(), 14);
+        } else if (state == "done" && !job["outputPath"].toString().isEmpty()) {
+            button("打开", left + usable - 190, yy, 90, 40, "download:reveal:" + job["id"].toString(), 14);
         }
         rule(left, yy + 50, usable, 0.15);
     }
@@ -728,7 +730,7 @@ void NativeHud::settings(double x, double y, double width) {
     if (!music.isLocal()) {
         rows.append({"DOWNLOAD QUALITY / 下载音质", music.downloads.qualityLabel(), "download:quality"});
         rows.append({"DOWNLOAD LYRICS / 歌词保存", music.downloads.lyricLabel(), "download:lyric"});
-        if (music.provider == "qq" || music.provider == "netease") {
+        if (music.provider == "qq" || music.provider == "netease" || music.provider == "kugou") {
             rows.append(
                 {"DOWNLOAD IDENTITY / 下载身份", music.downloads.identityLabel(), "download:identity"});
         }
@@ -737,8 +739,11 @@ void NativeHud::settings(double x, double y, double width) {
     }
     rows.append({"DOWNLOAD FOLDER / " + fit(music.downloads.directory(), 18, width - 460), "更改目录",
                  "download:directory"});
+    rows.append({"DECRYPT OUTPUT / " + fit(music.downloads.decryptDirectory(), 18, width - 460), "更改目录",
+                 "download:decrypt-directory"});
     rows.append({"DOWNLOAD QUEUE / 下载队列", "打开", "download:open"});
-    rows.append({"UNLOCK / 解密 QQ 加密与网易云 NCM", "选择文件", "download:decrypt"});
+    rows.append({"UNLOCK FILES / 解密加密文件", "选择文件", "download:decrypt"});
+    rows.append({"UNLOCK FOLDER / 解密整个文件夹", "选择文件夹", "download:decrypt-folder"});
     // 内容高度随平台可用选项变化
     constexpr double preferenceTop = 424;
     constexpr double rowStep = 66;
