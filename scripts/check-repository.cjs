@@ -54,10 +54,11 @@ const sourceDirectories = new Set([
 ]);
 // 公开文档只保留应用说明，开发规范、整改方案和会话记录留在本机。
 // tools/perf/README.md 是测量脚手架的用法说明，属于随工具发布的运行文档。
-const documentation = ['README.md', 'tools/perf/README.md'];
+// MusicBridge/vendor/music-download/SOURCE.md 记录 vendored 下载管线来源与 core.cjs 再生步骤。
+const documentation = ['README.md', 'tools/perf/README.md', 'MusicBridge/vendor/music-download/SOURCE.md'];
 assert.deepEqual(
     files.filter((file) => /\.md$/i.test(file)).sort(),
-    documentation,
+    [...documentation].sort(),
     'Unexpected public documentation',
 );
 for (const file of files) {
