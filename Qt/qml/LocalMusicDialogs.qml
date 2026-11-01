@@ -29,6 +29,28 @@ Item {
         nameFilters: ["音乐文件 (*.mp3 *.flac *.m4a *.mp4 *.aac *.ogg *.opus *.ape *.wav *.aiff *.aif *.wv *.wma *.mpc)"]
         onAccepted: backend.importLocal(selectedFiles)
     }
+    FolderDialog {
+        id: downloadFolderDialog
+        objectName: "downloadFolderDialog"
+        Binding on parentWindow {
+            when: Qt.platform.os === "windows"
+            value: dialogs.hostWindow
+        }
+        title: "选择下载目录"
+        onAccepted: backend.setDownloadDirectory(selectedFolder)
+    }
+    FileDialog {
+        id: decryptFileDialog
+        objectName: "decryptFileDialog"
+        Binding on parentWindow {
+            when: Qt.platform.os === "windows"
+            value: dialogs.hostWindow
+        }
+        title: "选择加密音乐文件"
+        fileMode: FileDialog.OpenFiles
+        nameFilters: ["QQ 音乐加密 / 网易云 NCM (*.mflac *.mflac0 *.mgg *.mgg0 *.mgg1 *.qmc0 *.qmcflac *.qmcogg *.ncm)"]
+        onAccepted: backend.decryptLocal(selectedFiles)
+    }
     Connections {
         target: backend
         function onLocalImportRequested(folder: bool) {
@@ -37,6 +59,12 @@ Item {
             } else {
                 localFileDialog.open();
             }
+        }
+        function onDownloadDirectoryRequested() {
+            downloadFolderDialog.open();
+        }
+        function onDownloadDecryptRequested() {
+            decryptFileDialog.open();
         }
     }
 }

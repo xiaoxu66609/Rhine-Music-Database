@@ -271,6 +271,8 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
         }
         const auto item = music.directory->item;
         confirmTitle = "删除歌单：" + item["title"].toString();
+        confirmBody = "此操作将同步至" + music.providerName() + "。";
+        confirmAccept = "确认删除";
         const QPointer<MusicLibrary> owner(&music);
         const auto generation = music.accountGeneration();
         m_confirm = [owner, generation, item]() {

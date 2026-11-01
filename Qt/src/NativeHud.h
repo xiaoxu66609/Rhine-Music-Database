@@ -67,6 +67,8 @@ class NativeHud : public QObject {
     QString formKind;
     QString formPID;
     QString confirmTitle;
+    QString confirmBody;
+    QString confirmAccept;
     QString detailSort = "none";
     QString groupBy = "none";
     QString activeGroup;
@@ -111,6 +113,8 @@ class NativeHud : public QObject {
 
   signals:
     void localImportRequested(bool folder);
+    void downloadDirectoryRequested();
+    void downloadDecryptRequested();
 
   private:
     struct LyricRow {
@@ -231,6 +235,8 @@ class NativeHud : public QObject {
     void localPanel(double x, double y, double width);
     void playerBar(double x, double y, double width);
     void playerPanel(double x, double y, double width);
+    void downloadPanel(double x, double y, double width);
+    void downloadAction(const QString &action);
     void platformChoices(double x, double y, double width, bool expanded = false);
     void platformPanel(double x, double y, double width);
     void settings(double x, double y, double width);

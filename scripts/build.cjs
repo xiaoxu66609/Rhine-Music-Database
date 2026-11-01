@@ -117,6 +117,9 @@ function prepareResources() {
     fs.cpSync('MusicBridge/client', path.join(bridge, 'client'), {
         recursive: true,
     });
+    fs.cpSync('MusicBridge/download', path.join(bridge, 'download'), {
+        recursive: true,
+    });
     // package lock 变更时重新安装依赖，避免旧版本残留
     const dependencyHash = createHash('sha256')
         .update(fs.readFileSync(path.join(bridge, 'package.json')))

@@ -2,6 +2,9 @@ node_modules/
 output/
 vendor/
 MusicBridge/upstream/
+MusicBridge/vendor/
+MusicBridge/download/core.cjs
+MusicBridge/download/fixtures/
 Assets/
 Resources/*.json
 licenses/

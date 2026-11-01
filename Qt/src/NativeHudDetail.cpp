@@ -70,6 +70,9 @@ void NativeHud::detail(double width, double opacity) {
     text("MUSIC DATABASE", 60, 893, 10);
     text("DRAG TO INSPECT", 60, 917, 10);
     button("查看封面 ↗", 60, 944, 260, 35, "viewer", 14);
+    if (!music.isLocal()) {
+        button("下载这首 ↓", 336, 944, 200, 35, "download:song", 14);
+    }
     if (lyricsMode) {
         lyricsPanel(x, usable);
         restore();
@@ -457,6 +460,14 @@ void NativeHud::container(double width, double opacity) {
         fill(x + 195, 339, 180, 44, {119.0 / 255, 123.0 / 255, 96.0 / 255, 1});
         hit(x + 195, 339, 180, 44, "music:sort-menu", "排序方式");
         text("排序方式 ▾", x + 217, 351, 16, "demibold", 0, {0.96, 0.95, 0.91, 1});
+    }
+    if (!music.isLocal() && item["kind"] != "artist") {
+        const double downloadX = item["kind"] == "playlist" ? x + 390 : x + 195;
+        const auto downloadLabel =
+            item["kind"] == "album" ? QStringLiteral("↓  下载整张") : QStringLiteral("↓  下载已加载");
+        fill(downloadX, 339, 180, 44, {119.0 / 255, 123.0 / 255, 96.0 / 255, 1});
+        hit(downloadX, 339, 180, 44, "download:loaded", downloadLabel);
+        text(downloadLabel, downloadX + 22, 351, 16, "demibold", 0, {0.96, 0.95, 0.91, 1});
     }
     rule(x, 399, usable, 0.4);
     const auto titleX = x + 49;

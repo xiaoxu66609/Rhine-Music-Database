@@ -1,4 +1,5 @@
 #pragma once
+#include "DownloadCenter.h"
 #include "MusicPlayer.h"
 #include "LocalMusicLibrary.h"
 #include <QHash>
@@ -121,6 +122,7 @@ class MusicLibrary : public QObject {
     Host *host;
     MusicApi api;
     MusicPlayer player;
+    DownloadCenter downloads;
     std::unique_ptr<MusicDiscover> discover;
     std::array<QJsonArray, 5> lists;
     std::array<int, 5> totals{};

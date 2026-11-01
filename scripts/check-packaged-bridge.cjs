@@ -258,6 +258,18 @@ async function main() {
             const rejected = await request(route, route);
             assert.equal(rejected.body.code, 503);
         }
+        const downloadSnap = await request('download-snapshot', '/native/netease/downloadSnapshot', {
+            settings: {
+                downloadDir: temp,
+                quality: 'flac',
+                lyricMode: 'both',
+                identity: 'account',
+                concurrency: 2,
+            },
+        });
+        assert.equal(downloadSnap.body.code, 200);
+        assert(Array.isArray(downloadSnap.body.value.jobs));
+        assert.equal(typeof downloadSnap.body.value.active, 'number');
         child.stdin.end();
         const exit = await new Promise((resolve) => {
             child.once('exit', (code, signal) => resolve({ code, signal }));

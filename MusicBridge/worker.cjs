@@ -96,6 +96,7 @@ if (!fs.existsSync(tokenPath)) {
 }
 // 上游诊断可能包含 URL 或 Cookie，禁止混入 IPC 消息和日志。
 console.log = console.info = console.warn = console.error = console.debug = () => {};
+const downloadService = require('./download/service.cjs');
 const routes = Object.freeze({
     '/login/qr/key': 'login_qr_key',
     '/login/qr/check': 'login_qr_check',
@@ -267,6 +268,15 @@ function loadClient(name, request) {
  * 沿用锁定上游的协议与错误语义，响应 Cookie 交给父进程隔离处理。
  */
 async function dispatchRequest(message) {
+    const operation = typeof message.route === 'string' ? message.route.split('/')[3] : '';
+    if (
+        typeof message.route === 'string' &&
+        message.route.startsWith('/native/') &&
+        typeof operation === 'string' &&
+        operation.startsWith('download')
+    ) {
+        return downloadService.handle(message, dispatchRequest);
+    }
     if (message.route === '/local/lyrics') {
         let content = message.params?.content;
         let encoding;

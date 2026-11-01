@@ -362,6 +362,10 @@ void NativeHud::action(QString value) {
         return;
     }
 
+    if (value.startsWith("download:")) {
+        downloadAction(value.mid(9));
+        return;
+    }
     if (value.startsWith("update:")) {
         auto &updater = m_host->updater;
         if (value == "update:check") {
@@ -440,6 +444,8 @@ void NativeHud::action(QString value) {
                 const QPointer<MusicLibrary> owner(&music);
                 // 回调跨越确认面板的生命周期，必须复制字符串，不能捕获临时 JSON 字段引用。
                 const auto path = roots.at(index).toObject()["path"].toString();
+                confirmBody = QStringLiteral("只移除本地索引，磁盘音乐文件保持原样。");
+                confirmAccept = QStringLiteral("确认删除");
                 m_confirm = [owner, path] {
                     if (!owner || !owner->isLocal()) {
                         return;
@@ -874,5 +880,82 @@ void NativeHud::continueSort() {
         music.loadDirectoryPage();
     } else {
         music.loadTrackPage(music.tracks.size());
+    }
+}
+
+void NativeHud::downloadAction(const QString &action) {
+    auto &music = *m_music;
+    auto &downloads = music.downloads;
+    if (action == "open") {
+        openModal("downloads");
+        downloads.refresh();
+        return;
+    }
+    if (action == "quality") {
+        downloads.cycleQuality();
+        return;
+    }
+    if (action == "lyric") {
+        downloads.cycleLyric();
+        return;
+    }
+    if (action == "identity") {
+        downloads.cycleIdentity();
+        return;
+    }
+    if (action == "concurrency") {
+        downloads.cycleConcurrency();
+        return;
+    }
+    if (action == "directory") {
+        emit downloadDirectoryRequested();
+        return;
+    }
+    if (action == "decrypt") {
+        emit downloadDecryptRequested();
+        return;
+    }
+    if (action == "song") {
+        downloads.enqueueCurrent();
+        openModal("downloads");
+        return;
+    }
+    if (action == "loaded") {
+        int loaded = 0;
+        int total = 0;
+        if (downloads.needsAlbumConfirm(&loaded, &total)) {
+            confirmTitle = QStringLiteral("下载整张（已加载 %1 / %2 首）").arg(loaded).arg(total);
+            confirmBody = QStringLiteral("本页还没有这张专辑的全部曲目。现在下载可以保存已加载的音频和封面，"
+                                         "但不会生成 album.cue。把曲目加载完再下载整张，才会写出完整 cue。");
+            confirmAccept = QStringLiteral("仍然下载");
+            const QPointer<NativeHud> owner(this);
+            m_confirm = [owner] {
+                if (!owner) {
+                    return;
+                }
+                owner->m_music->downloads.enqueueLoaded();
+                owner->openModal("downloads");
+            };
+            openModal("confirm");
+            return;
+        }
+        downloads.enqueueLoaded();
+        openModal("downloads");
+        return;
+    }
+    if (action.startsWith("filter:")) {
+        downloads.setFilter(action.mid(7));
+        return;
+    }
+    if (action.startsWith("page:")) {
+        downloads.offset = std::max(0, downloads.offset + action.mid(5).toInt());
+        return;
+    }
+    if (action.startsWith("cancel:")) {
+        downloads.cancel(action.mid(7));
+        return;
+    }
+    if (action.startsWith("retry:")) {
+        downloads.retry(action.mid(6));
     }
 }
