@@ -207,7 +207,9 @@ void Host::requestJson(QString route, QJsonObject values, JsonReply callback) {
     }
     if (provider == "local" && route != "/local/lyrics" &&
         !(route.startsWith("/native/") &&
-          QStringList{"search", "lyrics", "songs"}.contains(route.section('/', 3, 3)))) {
+          (QStringList{"search", "lyrics", "songs", "downloadSnapshot", "downloadConfigure",
+                       "downloadUnlock", "downloadCancel", "downloadRetry"}
+               .contains(route.section('/', 3, 3))))) {
         callback({}, QStringLiteral("本地模式已禁用在线平台操作"));
         return;
     }

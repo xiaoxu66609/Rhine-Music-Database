@@ -187,13 +187,24 @@ function makeBundle(album, tracks) {
         tracks,
     );
     const declared = Number(album.totalTracks);
-    if (Number.isFinite(declared) && declared > bundle.totalTracks) {
+    const loadedCount = tracks.length;
+    if (Number.isFinite(declared) && declared > loadedCount) {
+        // 懒加载/残缺批次：抬高整辑 totalTracks 供 TRCK 总数，但标记 partialBatch，
+        // 多碟时 discTotals 仍只反映本批入队曲目数——若不拦 cue，两碟各 1 首也会写出 2 轨 album.cue。
+        bundle.partialBatch = true;
         bundle.totalTracks = declared;
         if (bundle.discs.length === 1) {
             bundle.discTotals[bundle.discs[0]] = declared;
         }
     }
     return bundle;
+}
+
+function coverBytes(data) {
+    if (!data) {
+        return undefined;
+    }
+    return Buffer.isBuffer(data) ? data : Buffer.from(data);
 }
 
 function qualityFromPrefix(prefix) {
@@ -551,7 +562,7 @@ async function downloadResolved(job, resolved, report, signal, cookies) {
                     trackTotal: job.album ? job.album.totalTracks : undefined,
                     disc: job.album ? (job.track.disc ?? job.album.discs[0]) : undefined,
                     discTotal: job.album && job.album.discs.length > 1 ? job.album.discs.length : undefined,
-                    cover: cover?.data,
+                    cover: coverBytes(cover?.data),
                     coverMime: cover?.mime,
                 },
                 { saveLrc: false },
@@ -561,9 +572,9 @@ async function downloadResolved(job, resolved, report, signal, cookies) {
             fs.writeFileSync(lrcPath, lyrics, 'utf8');
         }
     } catch (error) {
-        fs.rmSync(dest, { force: true });
-        fs.rmSync(lrcPath, { force: true });
-        throw error;
+        // 音频已落盘：标签/歌词失败时不删文件（与解密补全路径一致）
+        job.error = `标签/歌词写入失败：${error instanceof Error ? error.message : String(error)}`;
+        return { outputPath: dest };
     }
     return { outputPath: dest };
 }
@@ -747,8 +758,9 @@ function startUnlock(params, cookies) {
     }
     const batch = files.map((file) => {
         const base = path.basename(file);
+        const id = `unlock:${++jobSeq}`;
         const job = {
-            id: `unlock:${++jobSeq}`,
+            id,
             source: 'unlock',
             title: base,
             artist: '',
@@ -757,6 +769,7 @@ function startUnlock(params, cookies) {
             progress: 0,
             file,
         };
+        specs.set(id, { id, source: 'unlock', file, track: job.track });
         jobs.push(job);
         return job;
     });
@@ -775,28 +788,46 @@ function startUnlock(params, cookies) {
 }
 
 function trackFromNcmMeta(meta) {
-    if (!meta || !meta.musicId) {
+    if (!meta || typeof meta !== 'object') {
+        return null;
+    }
+    const name = typeof meta.musicName === 'string' ? meta.musicName.trim() : '';
+    const artist = typeof meta.artist === 'string' ? meta.artist.trim() : '';
+    const album = typeof meta.album === 'string' ? meta.album.trim() : '';
+    const idRaw = meta.musicId;
+    let id = '';
+    if (typeof idRaw === 'number' && Number.isFinite(idRaw) && idRaw > 0) {
+        id = String(idRaw);
+    } else if (typeof idRaw === 'string' && idRaw.trim() && Number(idRaw) > 0) {
+        id = String(Number(idRaw));
+    }
+    if (!name && !artist && !album && !id) {
         return null;
     }
     return {
-        id: String(meta.musicId),
-        name: meta.musicName || '未命名',
-        artist: meta.artist || '未知歌手',
-        album: meta.album || '',
+        id,
+        name: name || '未命名',
+        artist: artist || '未知歌手',
+        album,
         cover: meta.albumPic || '',
     };
 }
 
 async function tagUnlockOutput(job, outputPath, ext, track, source, cookies, coverOverride) {
     const normalized = String(ext || '').replace(/^\./, '').toLowerCase();
-    if (normalized !== 'mp3' && normalized !== 'flac') {
-        job.state = 'done';
-        job.progress = 100;
-        job.error = '';
-        return;
-    }
     const lyricMode = settings.lyricMode;
     const lyrics = lyricMode === 'none' ? '' : await fetchLyrics({ source, track }, cookies);
+    const wantLrc = lyricMode === 'both' || lyricMode === 'lrc';
+    const lrcPath = outputPath.slice(0, -(String(ext || '').replace(/^\./, '').length + 1)) + '.lrc';
+    if (normalized !== 'mp3' && normalized !== 'flac') {
+        if (wantLrc && lyrics) {
+            fs.writeFileSync(lrcPath, lyrics, 'utf8');
+        }
+        job.state = 'done';
+        job.progress = 100;
+        job.error = wantLrc && lyrics ? '' : '仅解密（容器不支持内嵌标签）';
+        return;
+    }
     const embed = lyricMode === 'both' || lyricMode === 'embed';
     let cover = coverOverride;
     if (!cover && track.cover) {
@@ -812,13 +843,13 @@ async function tagUnlockOutput(job, outputPath, ext, track, source, cookies, cov
             copyright: '',
             genre: '',
             lyrics: embed ? lyrics : '',
-            cover: cover?.data,
+            cover: coverBytes(cover?.data),
             coverMime: cover?.mime,
         },
         { saveLrc: false },
     );
-    if ((lyricMode === 'both' || lyricMode === 'lrc') && lyrics) {
-        fs.writeFileSync(outputPath.slice(0, -(ext.length + 1)) + '.lrc', lyrics, 'utf8');
+    if (wantLrc && lyrics) {
+        fs.writeFileSync(lrcPath, lyrics, 'utf8');
     }
     job.state = 'done';
     job.progress = 100;
@@ -899,7 +930,7 @@ async function processNcmUnlock(job, file, outDir, cookies) {
         return;
     }
     const embeddedCover = decrypted.cover
-        ? { data: decrypted.cover.data, mime: decrypted.cover.mime }
+        ? { data: coverBytes(decrypted.cover.data), mime: decrypted.cover.mime }
         : undefined;
     try {
         await tagUnlockOutput(job, outputPath, ext, track, 'netease', cookies, embeddedCover);
@@ -954,4 +985,4 @@ async function handle(message, request) {
     return fail('不支持的下载操作');
 }
 
-module.exports = { handle, snapshot, settings, makeBundle };
+module.exports = { handle, snapshot, settings, makeBundle, coverBytes };

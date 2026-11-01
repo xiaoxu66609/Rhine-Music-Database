@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QPointer>
+#include <QSet>
 #include <QStandardPaths>
 
 namespace {
@@ -176,7 +177,12 @@ QJsonObject DownloadCenter::settingsObject() const {
 }
 
 void DownloadCenter::post(const QString &operation, const QJsonObject &params) {
-    if (m_host->offline) {
+    static const QSet<QString> offlineLocalOps{
+        QStringLiteral("downloadUnlock"),  QStringLiteral("downloadSnapshot"),
+        QStringLiteral("downloadConfigure"), QStringLiteral("downloadCancel"),
+        QStringLiteral("downloadRetry"),
+    };
+    if (m_host->offline && !offlineLocalOps.contains(operation)) {
         notice = QStringLiteral("当前离线，不能下载");
         m_library->changed();
         return;

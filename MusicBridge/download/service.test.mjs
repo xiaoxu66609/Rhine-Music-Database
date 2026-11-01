@@ -230,8 +230,80 @@ test('makeBundle 多碟懒加载只抬高整辑 totalTracks，不污染各碟 di
         tracks,
     );
     assert.equal(bundle.totalTracks, 30);
+    assert.equal(bundle.partialBatch, true);
     assert.equal(bundle.discTotals[1], 1);
     assert.equal(bundle.discTotals[2], 1);
+});
+
+test('partialBatch 阻止多碟残缺 album.cue', () => {
+    const tracks = [
+        { id: '1', name: '碟一', artist: '歌手', disc: 1, trackNo: 1 },
+        { id: '2', name: '碟二', artist: '歌手', disc: 2, trackNo: 1 },
+    ];
+    const bundle = service.makeBundle(
+        { source: 'netease', id: '9', name: '双碟', artist: '歌手', totalTracks: 30 },
+        tracks,
+    );
+    const packager = new core.AlbumPackager();
+    packager.plan(bundle, tracks);
+    packager.record(bundle, {
+        trackNo: 1,
+        outputPath: '/tmp/CD01/01 碟一.flac',
+        ext: 'flac',
+        title: '碟一',
+    });
+    packager.record(bundle, {
+        trackNo: 1,
+        outputPath: '/tmp/CD02/01 碟二.flac',
+        ext: 'flac',
+        title: '碟二',
+    });
+    assert.equal(packager.cueEntries(bundle, 1).length, 0);
+    assert.equal(packager.cueEntries(bundle, 2).length, 0);
+});
+
+test('NCM 内嵌封面写入前转为 Buffer', () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9, 0x11, 0x22, 0x33]);
+    const asUint = Uint8Array.from(jpeg);
+    const fromBuffer = service.coverBytes(jpeg);
+    const fromUint = service.coverBytes(asUint);
+    assert.equal(Buffer.isBuffer(fromBuffer), true);
+    assert.equal(Buffer.isBuffer(fromUint), true);
+    assert.equal(fromUint.equals(jpeg), true);
+});
+
+test('解锁任务登记 specs，失败后可重试', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rhine-unlock-retry-'));
+    const bad = path.join(dir, 'missing.ncm');
+    const settings = { downloadDir: dir, decryptDir: dir, lyricMode: 'none', concurrency: 1 };
+    const request = async () => ({ body: { code: 404 } });
+    const started = await service.handle(
+        {
+            route: '/native/qq/downloadUnlock',
+            params: { settings, files: [bad] },
+            cookies: {},
+        },
+        request,
+    );
+    assert.equal(started.body.code, 200);
+    const deadline = Date.now() + 5000;
+    let failed;
+    for (;;) {
+        failed = service.snapshot().jobs.find(
+            (job) => job.source === 'unlock' && job.title === 'missing.ncm' && job.state === 'failed',
+        );
+        if (failed || Date.now() > deadline) {
+            break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    assert.ok(failed);
+    const retried = await service.handle(
+        { route: '/native/qq/downloadRetry', params: { id: failed.id }, cookies: {} },
+        request,
+    );
+    assert.equal(retried.body.code, 200);
+    fs.rmSync(dir, { recursive: true, force: true });
 });
 
 async function waitFor(request, before) {

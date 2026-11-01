@@ -5470,6 +5470,7 @@ var AlbumPackager = class {
    *  音频照下。真实数据走不到这条（bundle 与 tracks 出自同一次解析），走到就说明两处对不上，
    *  此时出 cue 等于凭猜测决定这张专辑有几首——宁缺不错。 */
   discFull(b, exp, d, disc) {
+    if (b.partialBatch) return false;
     const required = b.discTotals?.[disc];
     if (typeof required !== "number") return false;
     let inDisc = 0;
