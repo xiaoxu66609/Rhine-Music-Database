@@ -204,6 +204,20 @@ test('QQ 加密文件解密后落盘，无法识别的扩展名记失败', async
     fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('makeBundle 多碟懒加载只抬高整辑 totalTracks，不污染各碟 discTotals', () => {
+    const tracks = [
+        { id: '1', name: '碟一', artist: '歌手', disc: 1, trackNo: 1 },
+        { id: '2', name: '碟二', artist: '歌手', disc: 2, trackNo: 1 },
+    ];
+    const bundle = service.makeBundle(
+        { source: 'netease', id: '9', name: '双碟', artist: '歌手', totalTracks: 30 },
+        tracks,
+    );
+    assert.equal(bundle.totalTracks, 30);
+    assert.equal(bundle.discTotals[1], 1);
+    assert.equal(bundle.discTotals[2], 1);
+});
+
 async function waitFor(request, before) {
     const started = Date.now();
     for (;;) {

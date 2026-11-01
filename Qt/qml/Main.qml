@@ -18,9 +18,9 @@ Window {
     flags: (windowsFrameless ? Qt.FramelessWindowHint : 0) | Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint | Qt.WindowFullscreenButtonHint
     title: "RHINE MUSIC DATABASE"
     color: "#e7e7e1"
-    // 原生对话框挂在真实窗口；iOS 使用独立的导入入口。
+    // 本地导入与下载目录/解密文件选择共用；iOS 无独立入口，须挂载对话框才能响应 Engine 信号。
     Loader {
-        active: !root.ios
+        active: true
         sourceComponent: LocalMusicDialogs {
             backend: rhine
         }

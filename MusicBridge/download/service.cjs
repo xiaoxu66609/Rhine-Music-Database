@@ -189,10 +189,6 @@ function makeBundle(album, tracks) {
         bundle.totalTracks = declared;
         if (bundle.discs.length === 1) {
             bundle.discTotals[bundle.discs[0]] = declared;
-        } else {
-            for (const disc of bundle.discs) {
-                bundle.discTotals[disc] = (bundle.discTotals[disc] || 0) + declared;
-            }
         }
     }
     return bundle;
@@ -879,4 +875,4 @@ async function handle(message, request) {
     return fail('不支持的下载操作');
 }
 
-module.exports = { handle, snapshot, settings };
+module.exports = { handle, snapshot, settings, makeBundle };

@@ -187,6 +187,18 @@ MusicBridge/lyrics-format.cjs 移植 LyricsKit 的 LyricsCore LRC 与 LyricsServ
 完整许可见 MusicBridge/LyricsKit-LICENSE。该文件的 MPL 许可单独保留，其他自维护源码沿用原许可。
 来源：https://github.com/MxIris-LyricsX-Project/LyricsKit 。发布包随附此文件的可编辑 JavaScript 源码。
 
+## 音乐下载与 QQ 加密解密
+
+下载队列、直链落盘、网易云 CDN 节点替换、歌词合并、专辑目录与 cue、MP3/FLAC 标签写入，以及 QQ 音乐
+`.mflac` / `.mgg` / `.qmc0` 等加密文件解密，来自
+https://github.com/xiaoxu66609/music-download （Rhine 内路径 `MusicBridge/vendor/music-download`、
+运行 bundle `MusicBridge/download/core.cjs` 与 `MusicBridge/download/service.cjs`）。Rhine 不使用其
+Electron/Vue 界面，仅复用主进程下载逻辑；固定来源与重新生成步骤见 `MusicBridge/vendor/music-download/SOURCE.md`。
+
+QQ 加密解密算法移植自 UnlockMusicProject_Archive（https://github.com/showhwa/UnlockMusicProject_Archive ）。
+MP3 内嵌标签通过 node-id3（https://github.com/Zazama/node-id3 ，MIT）写入，已编入 `core.cjs` bundle，
+不单独随包分发 node_modules。
+
 ## 本地音乐标签
 
 TagLib 2.1.1，按 MPL-1.1 使用，源码未修改。来源：https://github.com/taglib/taglib/tree/v2.1.1 。

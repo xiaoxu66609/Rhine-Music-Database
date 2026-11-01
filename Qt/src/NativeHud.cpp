@@ -233,6 +233,12 @@ void NativeHud::draw(QJsonObject next, double stageWidth, double time) {
     }
     motion.sample(time);
     if (closing && motion.finished()) {
+        if (modal == "confirm") {
+            confirmTitle.clear();
+            confirmBody.clear();
+            confirmAccept.clear();
+            m_confirm = nullptr;
+        }
         modal.clear();
         closing = false;
     }
