@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (vMAJOR.MINOR.PATCH, e.g. v1.0.0)'
+        description: 'Release version (MAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH, e.g. 1.0.0 or v1.0.0)'
         required: true
         type: string
 
@@ -19,12 +19,21 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.normalize.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+      - name: Normalize release tag
+        id: normalize
+        env:
+          RAW_TAG: ${{ inputs.tag }}
+        run: |
+          tag=$(node -p "require('./scripts/release-version.cjs').normalizeReleaseTag(process.env.RAW_TAG)")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Validate release version
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ steps.normalize.outputs.tag }}
           SOURCE_SHA: ${{ github.sha }}
         run: node scripts/publish-release.cjs --check
 
@@ -32,7 +41,7 @@ jobs:
     needs: prepare
     uses: ./.github/workflows/desktop.yml
     with:
-      release_version: ${{ inputs.tag }}
+      release_version: ${{ needs.prepare.outputs.release_tag }}
 
   release:
     needs: [prepare, build]
@@ -48,7 +57,7 @@ jobs:
           path: artifacts
       - name: Collect exact release packages
         env:
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
         run: |
           set -euo pipefail
           mkdir release
@@ -64,6 +73,6 @@ jobs:
       - name: Upload, verify and publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
           SOURCE_SHA: ${{ github.sha }}
         run: node scripts/publish-release.cjs
