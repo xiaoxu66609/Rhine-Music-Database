@@ -7,7 +7,7 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QJsonDocument>
-#ifndef Q_OS_IOS
+#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
 #include <QProcess>
 #endif
 #include <QThread>
@@ -15,8 +15,8 @@
 #include <memory>
 #include <utility>
 
-#ifndef Q_OS_IOS
-/** 桌面端连接同一用户的唯一服务；iOS 不允许拉起独立音频服务进程。 */
+#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
+/** 桌面端连接同一用户的唯一服务；移动端不允许拉起独立音频服务进程。 */
 bool connectPlaybackService(PlaybackConnection &connection, const QString &root, QString &error) {
     const auto endpoint = PlaybackConnection::endpoint();
     if (!connection.connectToService(endpoint, 100)) {

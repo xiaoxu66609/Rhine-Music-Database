@@ -7,6 +7,7 @@ const distributionPlatforms = [
     'Windows-x64-Setup.exe',
     'Linux-x86_64.AppImage',
     'ios-unsigned.ipa',
+    'Android-arm64.apk',
 ];
 
 /** 发布 tag 在编译前确定；普通构建明确标记为开发版，避免缓存上次的发布身份。 */
@@ -46,4 +47,19 @@ function normalizeReleaseTag(value) {
     return `v${built.version}`;
 }
 
-module.exports = { buildVersion, packageIdentity, normalizeReleaseTag, distributionPlatforms };
+/** Android versionCode。开发包固定为 1；正式版由 major.minor.patch 展开，且能装进有符号 32 位。 */
+function androidVersionCode(version = buildVersion()) {
+    if (!version.release) {
+        return 1;
+    }
+    const [major, minor, patch] = version.version.split('.').map(Number);
+    return major * 10000 + minor * 100 + patch;
+}
+
+module.exports = {
+    androidVersionCode,
+    buildVersion,
+    packageIdentity,
+    normalizeReleaseTag,
+    distributionPlatforms,
+};

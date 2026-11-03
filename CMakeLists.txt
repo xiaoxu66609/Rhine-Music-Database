@@ -92,7 +92,12 @@ FetchContent_Declare(
     URL_HASH SHA256=bd57924496a272322d6f9252502da4e620b6ab9777992e8934779ebd64babd6e)
 FetchContent_MakeAvailable(taglib)
 # AMD FidelityFX（FSR3 组件 + Vulkan 后端，DX12 仅在 Windows 下接入）。 SDK 目标由 RhineMusicDatabase 链接，见文件末尾的
-# FidelityFX::SDK 段。
+# FidelityFX::SDK 段。Android 发布包走 OpenGL ES，不编桌面 FSR3 SDK。
+if(ANDROID)
+    set(RHINE_ENABLE_FIDELITYFX
+        OFF
+        CACHE BOOL "Android release uses OpenGL ES without the desktop FSR3 SDK" FORCE)
+endif()
 include(cmake/FidelityFX.cmake)
 # 自维护源码和锁定的二维码库构成独立应用目标。
 set(RHINE_APP_SOURCES
@@ -221,8 +226,13 @@ list(FILTER RHINE_CORE_SOURCES EXCLUDE REGEX
      "/(main|Engine|Icon|RhiScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/|/fsr/|/fg/|/render/")
 list(REMOVE_ITEM RHINE_APP_SOURCES ${RHINE_CORE_SOURCES})
 # 桌面后台只链接播放源码；场景、字形、资料库与 HUD 不进入服务二进制。
+# Android 与 iOS 一样没有独立播放进程，整份核心留在应用里。
+set(RHINE_MOBILE_BUILD OFF)
+if(ANDROID OR IOS)
+    set(RHINE_MOBILE_BUILD ON)
+endif()
 set(RHINE_SYSTEM_CORE RhineCore)
-if(NOT IOS)
+if(NOT RHINE_MOBILE_BUILD)
     set(RHINE_PLAYBACK_SOURCES ${RHINE_CORE_SOURCES})
     list(
         FILTER
@@ -263,7 +273,7 @@ target_link_libraries(
     RhineCore
     PUBLIC Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent Qt6::Multimedia
     PRIVATE Qt6::MultimediaPrivate tag)
-if(NOT IOS)
+if(NOT RHINE_MOBILE_BUILD)
     target_link_libraries(RhineCore PUBLIC RhinePlaybackCore)
 endif()
 add_subdirectory(Qt)
@@ -381,7 +391,8 @@ qt_add_shaders(
     Qt/shaders/fgComposite.frag)
 # 唯一场景的烘焙材质与最终合成着色器
 set(RHINE_OPTICAL_SHADER_DEFINES)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+# Android 的 Qt 同时定义 Q_OS_LINUX，C++ uniform 布局与 Linux 相同，着色器必须带同一组矩阵。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
     list(APPEND RHINE_OPTICAL_SHADER_DEFINES RHINE_SINGLE_PASS_MOTION=1)
 endif()
 qt_add_shaders(
@@ -422,7 +433,7 @@ target_link_libraries(
             Qt6::Concurrent
             Qt6::Multimedia)
 # 平台分支只处理原生能力、部署身份及链接依赖。
-if(NOT IOS)
+if(NOT RHINE_MOBILE_BUILD)
     target_sources(RhineMusicDatabase PRIVATE Qt/tests/PlaybackServiceChecks.cpp
                                               Qt/tests/WindowTransitionChecks.cpp)
     if(WIN32 OR (APPLE AND NOT IOS))
@@ -520,6 +531,10 @@ elseif(WIN32)
                                                        Qt6::MultimediaPrivate)
     target_compile_options(RhineMusicDatabase PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
     target_compile_options(RhineCore PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+elseif(ANDROID)
+    target_sources(${RHINE_SYSTEM_CORE} PRIVATE Qt/src/PlatformAndroid.cpp Qt/src/PlatformAndroid.h)
+    target_sources(RhineCore PRIVATE Qt/src/BridgeProcessIOS.cpp Qt/src/BridgeProcess.h)
+    include(Qt/Android.cmake)
 elseif(UNIX)
     # Linux 复用同一份原生场景实现；凭据、协议交付和媒体集成由本平台文件补齐。
     target_sources(${RHINE_SYSTEM_CORE} PRIVATE Qt/src/PlatformLinux.cpp)
@@ -566,8 +581,8 @@ if(APPLE
         VERBATIM)
 endif()
 qt_finalize_executable(RhineMusicDatabase)
-# 桌面回归包含子进程和桌面路径，iOS 只构建正式应用。
-if(IOS)
+# 桌面回归包含子进程和桌面路径，移动端只构建正式应用。
+if(RHINE_MOBILE_BUILD)
     return()
 endif()
 enable_testing()

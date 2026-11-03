@@ -9,10 +9,11 @@ import Rhine.Native 1.0
 Window {
     id: root
     readonly property bool ios: Qt.platform.os === "ios"
+    readonly property bool touchInput: ios || Qt.platform.os === "android"
     width: 1280
     height: 720
-    minimumWidth: ios ? 0 : 960
-    minimumHeight: ios ? 0 : 540
+    minimumWidth: touchInput ? 0 : 960
+    minimumHeight: touchInput ? 0 : 540
     visible: true
     property bool windowsFrameless: Qt.platform.os === "windows"
     flags: (windowsFrameless ? Qt.FramelessWindowHint : 0) | Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint | Qt.WindowFullscreenButtonHint

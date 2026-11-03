@@ -8,6 +8,7 @@
         "build": "node scripts/build.cjs",
         "build:ios": "node scripts/build-ios.cjs",
         "build:ios:simulator": "node scripts/build-ios.cjs --simulator",
+        "build:android": "node scripts/build-android.cjs",
         "bundle:bridge": "node scripts/bundle-bridge.cjs",
         "package:cmake": "node scripts/build.cjs --cmake-package",
         "test": "node scripts/test.cjs",

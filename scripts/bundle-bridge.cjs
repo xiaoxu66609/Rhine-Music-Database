@@ -179,13 +179,17 @@ async function main() {
         bundle: true,
         platform: 'node',
         format: 'cjs',
-        target: process.env.RHINE_IOS_BUILD === '1' ? 'node18' : 'node22',
+        target:
+            process.env.RHINE_IOS_BUILD === '1' || process.env.RHINE_ANDROID_BUILD === '1'
+                ? 'node18'
+                : 'node22',
         logLevel: 'warning',
         // jsdom 的同步 XHR worker 由下面的第二个产物提供，路径在发布包内仍然有效。
         logOverride: { 'require-resolve-not-external': 'silent' },
         plugins: [
             requestResetPlugin,
             ...(process.env.RHINE_IOS_BUILD === '1' ? [require('./ios-bridge-plugin.cjs')] : []),
+            ...(process.env.RHINE_ANDROID_BUILD === '1' ? [require('./android-bridge-plugin.cjs')] : []),
         ],
     });
     failOnDynamicRequires(result);
@@ -198,7 +202,10 @@ async function main() {
         bundle: true,
         platform: 'node',
         format: 'cjs',
-        target: process.env.RHINE_IOS_BUILD === '1' ? 'node18' : 'node22',
+        target:
+            process.env.RHINE_IOS_BUILD === '1' || process.env.RHINE_ANDROID_BUILD === '1'
+                ? 'node18'
+                : 'node22',
         logLevel: 'warning',
         logOverride: { 'require-resolve-not-external': 'silent' },
     });
