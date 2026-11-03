@@ -4,7 +4,12 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { createUpdateFeed } = require('../../scripts/create-update-feed.cjs');
-const { buildVersion, packageIdentity, distributionPlatforms } = require('../../scripts/release-version.cjs');
+const {
+    androidVersionCode,
+    buildVersion,
+    packageIdentity,
+    distributionPlatforms,
+} = require('../../scripts/release-version.cjs');
 assert.deepEqual(buildVersion('v1.10.2'), { version: '1.10.2', release: true });
 assert.deepEqual(buildVersion('2.0.0'), { version: '2.0.0', release: true });
 assert.equal(buildVersion('').release, false);
@@ -12,6 +17,9 @@ const development = buildVersion('');
 assert.equal(development.version, '0.0.0');
 assert.match(packageIdentity(development), /^[0-9a-f]{12,40}$/);
 assert.equal(packageIdentity(buildVersion('v1.10.2')), 'v1.10.2');
+assert.equal(androidVersionCode(buildVersion('v1.2.3')), 10203);
+assert.equal(androidVersionCode(buildVersion('v0.4.1')), 401);
+assert.equal(androidVersionCode(buildVersion('')), 1);
 for (const invalid of ['v1.0', 'v01.0.0', 'v1.0.0-beta.1', '1.0.0\n', 'v65536.0.0', '$(touch bad)']) {
     assert.throws(() => buildVersion(invalid));
 }
@@ -25,7 +33,7 @@ try {
     }
     const feed = createUpdateFeed(temporary, 'v1.2.3');
     assert.equal(feed.tag_name, 'v1.2.3');
-    assert.equal(feed.assets.length, 4);
+    assert.equal(feed.assets.length, distributionPlatforms.length);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(temporary, 'update.json'))), feed);
     for (const asset of feed.assets) {
         assert.equal(asset.size, contents.length);

@@ -10,10 +10,15 @@
 #include "FrameProfiler.h"
 #include "GraphicsBackend.h"
 #include "Hud.h"
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 #include "LinuxGraphics.h"
+#endif
 #include "RhiScene.h"
-#ifndef Q_OS_IOS
+#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
 #include "PlaybackConnection.h"
+#endif
+#ifdef Q_OS_ANDROID
+#include "PlatformAndroid.h"
 #endif
 #ifdef Q_OS_MACOS
 #include "InterfaceWindowMac.h"
@@ -42,9 +47,7 @@
 #include <QTimer>
 #include <cstdio>
 #include <cstring>
-#ifndef Q_OS_IOS
 #include <memory>
-#endif
 /* Qt 的 Vulkan 类型只在「Qt 带 Vulkan 特性」且「应用侧能看到 vulkan.h」时声明：
  *   qvulkaninstance.h:  #if QT_CONFIG(vulkan) || defined(Q_QDOC)
  *                      #if __has_include(<vulkan/vulkan.h>) || defined(Q_QDOC)
@@ -60,7 +63,7 @@
 #define RHINE_HAVE_VULKAN_TYPES 0
 #endif
 int makeIcon(const QString &directory);
-#ifndef Q_OS_IOS
+#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
 bool runPlaybackServiceChecks(const QString &resources, const QString &executable, const QString &gui);
 bool runWindowTransitionChecks();
 #endif
@@ -195,6 +198,13 @@ static void selectGraphicsBackend() {
         qWarning() << "Saved graphics backend" << saved << "is unavailable; using the default backend.";
     }
     // Windows 与 Linux 共用 Vulkan 优先、OpenGL 回退；不能交给 Qt 的平台默认选择。
+    // Android 发布包默认 OpenGL ES。显式 RHINE_GRAPHICS 或已保存的后端仍走上面的分支。
+#ifdef Q_OS_ANDROID
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+    RhineGraphics::setActiveBackend(QStringLiteral("opengl"));
+    qInfo() << "No backend configured; using OpenGL ES on Android.";
+    return;
+#endif
     if (vulkanDeviceAvailable()) {
         QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
         RhineGraphics::setActiveBackend(QStringLiteral("vulkan"));
@@ -338,11 +348,21 @@ int main(int argc, char **argv) {
         return 1;
     }
 #endif
-    // 两个平台都明确使用 FFmpeg，设备切换和重连由播放器独立处理。
+    // 桌面与 iOS 使用 FFmpeg。Android 用系统多媒体后端，Qt 的 Android kit 不带桌面 FFmpeg 插件。
     // 必须在 Qt 初始化多媒体前选择后端，显式环境变量仍可用于兼容性对照。
+#ifndef Q_OS_ANDROID
     if (qEnvironmentVariableIsEmpty("QT_MEDIA_BACKEND")) {
         qputenv("QT_MEDIA_BACKEND", "ffmpeg");
     }
+#endif
+#ifdef Q_OS_ANDROID
+    QSurfaceFormat gles = QSurfaceFormat::defaultFormat();
+    gles.setRenderableType(QSurfaceFormat::OpenGLES);
+    gles.setVersion(3, 0);
+    gles.setDepthBufferSize(24);
+    gles.setStencilBufferSize(8);
+    QSurfaceFormat::setDefaultFormat(gles);
+#endif
     // Windows GUI 子系统默认可能将 Qt 日志送到调试器；测试必须写入 CTest 的标准错误管道。
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--self-test") == 0 || std::strcmp(argv[i], "--playback-gui-test") == 0 ||
@@ -372,7 +392,7 @@ int main(int argc, char **argv) {
 #ifdef Q_OS_WIN
     initializeWindowsGraphics();
 #endif
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // Linux 没有 QT_D3D_ADAPTER_INDEX 那样的单一入口，选择只能落成厂商环境变量，
     // 所以同样要早于任何 QQuickWindow——RHI 在创建窗口时就定下了用哪块卡。
     initializeLinuxGraphics();
@@ -386,7 +406,7 @@ int main(int argc, char **argv) {
     QCoreApplication::setApplicationVersion(AppUpdater::currentVersion());
     QGuiApplication::setApplicationDisplayName(AppIdentity::DisplayName);
     const auto args = application.arguments();
-#ifndef Q_OS_IOS
+#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
     // 界面回归使用隔离的用户目录；必须在读取任何偏好之前建立。
     const bool playbackGuiTest = args.contains("--playback-gui-test");
     if (playbackGuiTest) {
@@ -415,6 +435,12 @@ int main(int argc, char **argv) {
     }
     QString root = qEnvironmentVariable("RHINE_RESOURCES");
     if (root.isEmpty()) {
+#ifdef Q_OS_ANDROID
+        root = prepareAndroidResources();
+        if (root.isEmpty()) {
+            return 1;
+        }
+#else
         // iOS 使用专用资源目录
         const auto base = QCoreApplication::applicationDirPath();
 #ifdef Q_OS_MACOS
@@ -433,6 +459,7 @@ int main(int argc, char **argv) {
         if (root.isEmpty()) {
             root = QDir::currentPath() + "/output/resources";
         }
+#endif
     }
     const bool test = args.contains("--self-test");
     const bool offline =
@@ -444,7 +471,7 @@ int main(int argc, char **argv) {
     }
 #endif
     if (test) {
-#ifndef Q_OS_IOS
+#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
 #ifdef Q_OS_MACOS
         if (QGuiApplication::platformName() == "cocoa") {
             // 无窗口的测试控制器不能占据第二个 Dock 身份或参与被测的调度组。
@@ -472,8 +499,8 @@ int main(int argc, char **argv) {
     }
     // 桌面版：音频、账号与播放队列由独立后台服务持有，界面进程只负责渲染。
     // 服务随界面启动并与其生命周期绑定：界面退出或崩溃都会停止播放并结束服务。
-    std::unique_ptr<PlaybackConnection> playback;
-#ifndef Q_OS_IOS
+    [[maybe_unused]] std::unique_ptr<PlaybackConnection> playback;
+#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
     if (!offline) {
         playback = std::make_unique<PlaybackConnection>();
         QString error;
@@ -632,7 +659,7 @@ int main(int argc, char **argv) {
                 },
                 Qt::QueuedConnection);
 #endif
-#ifndef Q_OS_IOS
+#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
             if (playbackGuiTest) {
                 qInfo("PLAYBACK_GUI_READY");
                 if (args.contains("--playback-test-quit")) {
@@ -694,7 +721,7 @@ int main(int argc, char **argv) {
 #endif
     window->installEventFilter(backend.get());
     profiler->attach(window);
-#ifndef Q_OS_IOS
+#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
     if (playbackGuiTest) {
         qInfo("PLAYBACK_GUI_READY");
         if (args.contains("--playback-test-quit")) {

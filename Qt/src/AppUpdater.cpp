@@ -73,6 +73,8 @@ QString AppUpdater::platformAsset() {
     const auto arch = QSysInfo::buildCpuArchitecture();
 #ifdef Q_OS_IOS
     return QStringLiteral("ios-unsigned.ipa");
+#elif defined(Q_OS_ANDROID)
+    return arch == QStringLiteral("arm64") ? QStringLiteral("Android-arm64.apk") : QString();
 #elif defined(Q_OS_MACOS)
     return arch == "arm64" ? "macOS-arm64.zip" : QString();
 #elif defined(Q_OS_WIN)
