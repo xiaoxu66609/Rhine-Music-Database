@@ -66,5 +66,31 @@ Item {
         function onDownloadDecryptRequested() {
             decryptFileDialog.open();
         }
+        function onDownloadDecryptFolderRequested() {
+            decryptFolderDialog.open();
+        }
+        function onDownloadDecryptDirectoryRequested() {
+            decryptOutFolderDialog.open();
+        }
+    }
+    FolderDialog {
+        id: decryptFolderDialog
+        objectName: "decryptFolderDialog"
+        Binding on parentWindow {
+            when: Qt.platform.os === "windows"
+            value: dialogs.hostWindow
+        }
+        title: "选择要解密的文件夹"
+        onAccepted: backend.decryptLocalFolder(selectedFolder)
+    }
+    FolderDialog {
+        id: decryptOutFolderDialog
+        objectName: "decryptOutFolderDialog"
+        Binding on parentWindow {
+            when: Qt.platform.os === "windows"
+            value: dialogs.hostWindow
+        }
+        title: "选择解密输出目录"
+        onAccepted: backend.setDecryptDirectory(selectedFolder)
     }
 }

@@ -123,6 +123,10 @@ class MusicLibrary : public QObject {
     MusicApi api;
     MusicPlayer player;
     DownloadCenter downloads;
+    QSet<QString> downloadPickIds;
+    void toggleDownloadPick(const QString &id);
+    void clearDownloadPicks();
+    QJsonArray downloadPickedTracks() const;
     std::unique_ptr<MusicDiscover> discover;
     std::array<QJsonArray, 5> lists;
     std::array<int, 5> totals{};

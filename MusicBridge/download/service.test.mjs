@@ -306,6 +306,59 @@ test('解锁任务登记 specs，失败后可重试', async () => {
     fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('解密目录扫描与分平台下载身份', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rhine-unlock-dir-'));
+    const nested = path.join(dir, 'nested');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, 'a.ncm'), Buffer.from([1, 2, 3]));
+    fs.writeFileSync(path.join(dir, 'readme.txt'), 'skip');
+    const request = async () => ({ body: { code: 200, value: { items: [] } } });
+    const started = await service.handle(
+        {
+            route: '/native/netease/downloadUnlock',
+            params: { directories: [dir], settings: { decryptDir: dir } },
+            cookies: {},
+        },
+        request,
+    );
+    assert.equal(started.body.code, 200);
+    assert.ok(started.body.value.jobs.some((job) => job.title === 'a.ncm'));
+
+    const enqueued = await service.handle(
+        {
+            route: '/native/qq/downloadEnqueue',
+            params: {
+                tracks: [{ id: 'mid', name: 't', artist: 'a', kind: 'song' }],
+                settings: { qqIdentity: 'anon', neIdentity: 'account' },
+            },
+            cookies: { qqmusic_session: 'x' },
+        },
+        async (message) => {
+            if (message.route === '/qq/getSongInfo') {
+                return {
+                    body: {
+                        songinfo: {
+                            data: {
+                                track_info: {
+                                    file: { size_128mp3: 1 },
+                                },
+                            },
+                        },
+                    },
+                };
+            }
+            if (message.route === '/qq/getMusicPlay') {
+                return {
+                    body: { data: { playUrl: { mid: { url: 'http://127.0.0.1/1.mp3' } } } },
+                };
+            }
+            return { body: { code: 404 } };
+        },
+    );
+    assert.equal(enqueued.body.code, 200);
+    fs.rmSync(dir, { recursive: true, force: true });
+});
+
 async function waitFor(request, before) {
     const started = Date.now();
     for (;;) {

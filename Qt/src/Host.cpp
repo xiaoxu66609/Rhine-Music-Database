@@ -662,22 +662,45 @@ void Host::logout() {
 QString Host::fromLink(QString input) const {
     input = input.remove('\\').trimmed();
     QUrl outer(input);
-    if (!QStringList{"music.163.com", "y.music.163.com"}.contains(outer.host()) ||
-        !QStringList{"http", "https"}.contains(outer.scheme())) {
+    if (!outer.isValid()) {
+        outer = QUrl(QStringLiteral("https://") + input);
+    }
+    if (!QStringList{"http", "https"}.contains(outer.scheme())) {
         return {};
     }
-    QUrl page = outer;
-    if (outer.hasFragment()) {
-        auto part = outer.fragment();
-        page = QUrl("https://music.163.com" + (part.startsWith('/') ? part : "/" + part));
+    if (QStringList{"music.163.com", "y.music.163.com"}.contains(outer.host())) {
+        QUrl page = outer;
+        if (outer.hasFragment()) {
+            auto part = outer.fragment();
+            page = QUrl("https://music.163.com" + (part.startsWith('/') ? part : "/" + part));
+        }
+        auto kind = page.path().split('/', Qt::SkipEmptyParts).last();
+        auto id = QUrlQuery(page).queryItemValue("id");
+        if (!QStringList{"song", "album", "playlist"}.contains(kind) ||
+            !QRegularExpression("^[0-9]{1,20}$").match(id).hasMatch()) {
+            return {};
+        }
+        return QStringLiteral("netease:") + kind + ":" + id;
     }
-    auto kind = page.path().split('/', Qt::SkipEmptyParts).last();
-    auto id = QUrlQuery(page).queryItemValue("id");
-    if (!QStringList{"song", "album", "playlist"}.contains(kind) ||
-        !QRegularExpression("^[0-9]{1,20}$").match(id).hasMatch()) {
+    if (outer.host() != "y.qq.com" && !outer.host().endsWith(".y.qq.com")) {
         return {};
     }
-    return kind + ":" + id;
+    const auto parts = outer.path().split('/', Qt::SkipEmptyParts);
+    if (parts.size() < 4 || parts.at(0) != "n" || parts.at(1) != "ryqq") {
+        return {};
+    }
+    const auto kindToken = parts.at(2);
+    const auto id = QUrl::fromPercentEncoding(parts.at(3).toUtf8());
+    if (kindToken == "songDetail" && !id.isEmpty()) {
+        return QStringLiteral("qq:song:") + id;
+    }
+    if (kindToken == "playlist" && QRegularExpression("^[0-9]{1,20}$").match(id).hasMatch()) {
+        return QStringLiteral("qq:playlist:") + id;
+    }
+    if (kindToken == "albumDetail" && !id.isEmpty()) {
+        return QStringLiteral("qq:album:") + id;
+    }
+    return {};
 }
 void Host::loadCover(QString input, TextReply callback) {
     // 后台仅保留封面地址；像素解码与纹理由可退出的 GUI 独占。

@@ -115,6 +115,8 @@ class NativeHud : public QObject {
     void localImportRequested(bool folder);
     void downloadDirectoryRequested();
     void downloadDecryptRequested();
+    void downloadDecryptFolderRequested();
+    void downloadDecryptDirectoryRequested();
 
   private:
     struct LyricRow {
