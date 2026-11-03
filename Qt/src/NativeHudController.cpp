@@ -117,8 +117,8 @@ void NativeHud::setQuery(QString value) {
                 return;
             }
             owner->m_music->search(value);
-            if ((owner->m_music->provider == "netease" || owner->m_music->provider == "qq") &&
-                !owner->m_host->fromLink(value).isEmpty()) {
+            const auto parsed = owner->m_host->fromLink(value);
+            if (!parsed.isEmpty() && parsed.section(':', 0, 0) == owner->m_music->provider) {
                 owner->closeModal();
             }
         });
@@ -930,10 +930,7 @@ void NativeHud::downloadAction(const QString &action) {
         return;
     }
     if (action.startsWith("pick:")) {
-        const int index = action.mid(5).toInt();
-        if (music.directory && index >= 0 && index < music.directory->songs.size()) {
-            music.toggleDownloadPick(music.directory->songs.at(index).toObject()["id"].toString());
-        }
+        music.toggleDownloadPick(action.mid(5));
         return;
     }
     if (action == "song") {

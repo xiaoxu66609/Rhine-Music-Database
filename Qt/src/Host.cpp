@@ -680,7 +680,7 @@ QString Host::fromLink(QString input) const {
             !QRegularExpression("^[0-9]{1,20}$").match(id).hasMatch()) {
             return {};
         }
-        return kind + ":" + id;
+        return QStringLiteral("netease:") + kind + ":" + id;
     }
     if (outer.host() != "y.qq.com" && !outer.host().endsWith(".y.qq.com")) {
         return {};
@@ -692,13 +692,13 @@ QString Host::fromLink(QString input) const {
     const auto kindToken = parts.at(2);
     const auto id = QUrl::fromPercentEncoding(parts.at(3).toUtf8());
     if (kindToken == "songDetail" && !id.isEmpty()) {
-        return QStringLiteral("song:") + id;
+        return QStringLiteral("qq:song:") + id;
     }
     if (kindToken == "playlist" && QRegularExpression("^[0-9]{1,20}$").match(id).hasMatch()) {
-        return QStringLiteral("playlist:") + id;
+        return QStringLiteral("qq:playlist:") + id;
     }
     if (kindToken == "albumDetail" && !id.isEmpty()) {
-        return QStringLiteral("album:") + id;
+        return QStringLiteral("qq:album:") + id;
     }
     return {};
 }

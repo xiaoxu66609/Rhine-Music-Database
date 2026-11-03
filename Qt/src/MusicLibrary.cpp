@@ -369,9 +369,13 @@ void MusicLibrary::search(QString text, QString kind, bool more) {
         return;
     }
     const auto link = !more ? host->fromLink(text) : QString();
-    if (!link.isEmpty() && (provider == "netease" || provider == "qq")) {
-        const auto type = link.section(':', 0, 0);
-        const auto value = MusicData::item(type, link.section(':', 1));
+    const auto linkProvider = link.section(':', 0, 0);
+    const auto linkKind = link.section(':', 1, 1);
+    const auto linkId = link.section(':', 2);
+    if (!link.isEmpty() && linkProvider == provider && (provider == "netease" || provider == "qq") &&
+        !linkKind.isEmpty() && !linkId.isEmpty()) {
+        const auto type = linkKind;
+        const auto value = MusicData::item(type, linkId);
         ++m_generation;
         searchLoading = false;
         keyword = text;
