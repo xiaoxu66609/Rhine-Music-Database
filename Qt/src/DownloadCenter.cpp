@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QPointer>
@@ -138,6 +139,31 @@ int DownloadCenter::concurrency() const {
 
 QString DownloadCenter::directory() const {
     const auto saved = m_host->preference("download-dir").trimmed();
+#ifdef Q_OS_ANDROID
+    const auto fallback = [] {
+        const auto base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        return QDir(base.isEmpty() ? QDir::homePath() : base).filePath(QStringLiteral("Music/Rhine"));
+    };
+    const auto usable = [](const QString &path) {
+        if (path.isEmpty()) {
+            return false;
+        }
+        if (!QDir().mkpath(path)) {
+            return false;
+        }
+        const auto probePath = path + QStringLiteral("/.write-check");
+        QFile probe(probePath);
+        if (!probe.open(QIODevice::WriteOnly)) {
+            return false;
+        }
+        probe.remove();
+        return true;
+    };
+    if (!saved.isEmpty() && usable(saved)) {
+        return saved;
+    }
+    return fallback();
+#else
     if (!saved.isEmpty()) {
         return saved;
     }
@@ -146,6 +172,7 @@ QString DownloadCenter::directory() const {
         music = QDir::homePath() + QStringLiteral("/Music");
     }
     return QDir(music).filePath(QStringLiteral("Rhine"));
+#endif
 }
 
 QString DownloadCenter::decryptDirectory() const {

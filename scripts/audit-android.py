@@ -5,6 +5,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 
 apk = pathlib.Path(sys.argv[1]).resolve()
@@ -33,6 +34,47 @@ if missing:
 if "resources.arsc" not in names:
     raise SystemExit("Compiled Android resources are missing")
 
+
+def find_readelf():
+    sdk = os.environ.get("ANDROID_NDK_ROOT") or os.environ.get("ANDROID_HOME") or os.environ.get(
+        "ANDROID_SDK_ROOT"
+    )
+    if sdk:
+        prebuilt = pathlib.Path(sdk) / "toolchains/llvm/prebuilt"
+        if prebuilt.is_dir():
+            for host in prebuilt.iterdir():
+                candidate = host / "bin/llvm-readelf"
+                if candidate.is_file():
+                    return candidate
+    return shutil.which("llvm-readelf") or shutil.which("readelf")
+
+
+def max_load_alignment(elf_path: pathlib.Path) -> int:
+    readelf = find_readelf()
+    if not readelf:
+        raise SystemExit("readelf or llvm-readelf is required to verify libnode.so page alignment")
+    output = subprocess.check_output([str(readelf), "-lW", str(elf_path)], text=True, errors="replace")
+    aligns = []
+    for line in output.splitlines():
+        if not line.startswith("  LOAD"):
+            continue
+        parts = line.split()
+        if len(parts) < 8:
+            continue
+        token = parts[-1]
+        if token.startswith("0x"):
+            aligns.append(int(token, 16))
+    if not aligns:
+        raise SystemExit(f"No LOAD segments found in {elf_path.name}")
+    return max(aligns)
+
+
+with zipfile.ZipFile(apk) as package:
+    libnode = pathlib.Path(tempfile.gettempdir()) / "rhine-libnode-audit.so"
+    libnode.write_bytes(package.read("lib/arm64-v8a/libnode.so"))
+    if max_load_alignment(libnode) < 16384:
+        raise SystemExit("lib/arm64-v8a/libnode.so is not 16 KB ELF-aligned (required for targetSdk 36)")
+    libnode.unlink(missing_ok=True)
 
 def find_aapt():
     sdk = os.environ.get("ANDROID_SDK_ROOT") or os.environ.get("ANDROID_HOME")
