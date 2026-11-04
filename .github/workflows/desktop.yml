@@ -427,7 +427,8 @@ jobs:
           java-version: '17'
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          # nodejs-mobile 18.20.4 android-configure 尚不支持 Python 3.12。
+          python-version: '3.11'
       # v3 默认会装已下架的 SDK 包 tools；v4 只装 platform-tools，其余在本 job 下一步用 sdkmanager 安装。
       - uses: android-actions/setup-android@v4
       - name: Install Android SDK and NDK
