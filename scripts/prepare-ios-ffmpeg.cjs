@@ -3,10 +3,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { spawnSync, execFileSync } = require('node:child_process');
+const { acquireFfmpegTree } = require('./ffmpeg-source.cjs');
 const source = require('../vendor/ffmpeg/source.json');
 const root = path.resolve(__dirname, '..');
 const directory = path.join(root, 'output/dependencies/ffmpeg-simulator');
-const archive = path.join(directory, `ffmpeg-${source.version}.tar.xz`);
 const install = path.join(directory, 'install');
 const frameworks = path.join(directory, 'frameworks');
 
@@ -19,20 +19,22 @@ function run(command, args, cwd = directory) {
 
 /** 交叉编译全部解码能力，保持与真机相同的 FFmpeg ABI；禁用未使用的录制和命令行工具。 */
 function main() {
-    fs.mkdirSync(directory, { recursive: true });
-    if (!fs.existsSync(archive)) {
-        run('curl', ['-L', '--fail', '--retry', '3', source.download, '-o', archive]);
-    }
-    const hash = createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
-    if (hash !== source.sha256) {
-        throw new Error('FFmpeg source checksum mismatch');
-    }
-    const buildKey = hash + '\n' + createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
+    const acquired = acquireFfmpegTree({
+        directory,
+        version: source.version,
+        download: source.download,
+        sha256: source.sha256,
+        repository: source.submodule.url,
+        tag: source.submodule.tag,
+        commit: source.submodule.commit,
+        run,
+    });
+    const sourceKey = acquired.provenance.sha256 || `git:${acquired.provenance.revision}`;
+    const buildKey = sourceKey + '\n' + createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
     const stamp = path.join(frameworks, '.source.sha256');
     if (fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8') === buildKey) {
         return;
     }
-    run('tar', ['-xf', archive]);
     const build = path.join(directory, 'build');
     fs.mkdirSync(build, { recursive: true });
     const sdk = execFileSync('xcrun', ['--sdk', 'iphonesimulator', '--show-sdk-path'], {
