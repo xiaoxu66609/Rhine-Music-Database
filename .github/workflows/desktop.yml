@@ -453,6 +453,7 @@ jobs:
           host: linux
           target: android
           arch: android_arm64_v8a
+          aqtsource: git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7
           modules: qtshadertools qtmultimedia
           # install-qt-action 在 aqt 支持时会自动加上 --autodesktop，
           # 装上同版本 desktop kit，提供 androiddeployqt 和 qsb。
