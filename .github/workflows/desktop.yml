@@ -19,7 +19,8 @@ permissions:
 
 concurrency:
   group: desktop-${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_version || 'development' }}
-  cancel-in-progress: true
+  # pull_request / workflow_call 排队即可；push 才取消同 ref 上的旧运行。
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   build:
@@ -59,6 +60,10 @@ jobs:
             distribution: 'Windows-x64-Setup.exe'
             timeout: 120
     runs-on: ${{ matrix.os }}
+    concurrency:
+      # 全仓库共用一个 macos-15 槽位，避免多路 PR 同时抢 runner 后在分配窗口内 cancelled。
+      group: ${{ matrix.os == 'macos-15' && format('rhine-macos-15-hosted-{0}', github.repository) || format('desktop-matrix-{0}-{1}', github.run_id, matrix.name) }}
+      cancel-in-progress: false
     env:
       NODE_VERSION: '26.11.1'
       RHINE_BUILD_TYPE: Release
@@ -354,6 +359,9 @@ jobs:
     # 都可能排队超过 hosted runner 分配窗口并以 cancelled 结束。等 build 矩阵完成后再跑 iOS。
     needs: build
     runs-on: macos-15
+    concurrency:
+      group: rhine-macos-15-hosted-${{ github.repository }}
+      cancel-in-progress: false
     timeout-minutes: 45
     env:
       RHINE_VERSION: ${{ inputs.release_version || '' }}
