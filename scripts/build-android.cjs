@@ -68,6 +68,20 @@ function prepareNodeMobile() {
     }
 }
 
+function alignLibnode() {
+    const ndk = process.env.ANDROID_NDK_ROOT;
+    if (!ndk) {
+        throw new Error('ANDROID_NDK_ROOT is required to build 16 KB-aligned libnode.so');
+    }
+    const library = path.join(dependencies, release.library);
+    run('bash', ['scripts/build-libnode-android.sh', ndk, library], {
+        env: {
+            ...process.env,
+            RHINE_NODE_MOBILE_SRC: path.join(dependencies, 'nodejs-mobile-src'),
+        },
+    });
+}
+
 function prepareResources() {
     ensureHostNode();
     run(process.execPath, ['scripts/build.cjs', '--resources-only']);
@@ -225,10 +239,11 @@ if (prepareOnly) {
 ensureKeystore();
 const sdk = androidSdk();
 const ndk = androidNdk(sdk);
-const qt = qtKit();
-const host = qtHost(qt);
 process.env.ANDROID_SDK_ROOT = sdk;
 process.env.ANDROID_NDK_ROOT = ndk;
+alignLibnode();
+const qt = qtKit();
+const host = qtHost(qt);
 process.env.QT_ANDROID_KEYSTORE_PATH = keystore;
 process.env.QT_ANDROID_KEYSTORE_ALIAS = keyAlias;
 process.env.QT_ANDROID_KEYSTORE_STORE_PASS = storePass;

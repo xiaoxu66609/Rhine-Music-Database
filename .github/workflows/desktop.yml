@@ -408,11 +408,18 @@ jobs:
           set -euo pipefail
           # 主机侧 qsb 链接 libEGL，镜像里不一定有。
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libegl1 libgl1
+          sudo apt-get install --yes --no-install-recommends libegl1 libgl1 gcc-multilib g++-multilib
           # sdkmanager 在许可证问完后会让 yes 收到 SIGPIPE；不能因此让安装失败。
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
           echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            output/dependencies/nodejs-mobile-src
+            output/dependencies/node-mobile-android/bin/arm64-v8a/libnode.so
+          key: libnode-v18.20.4-ndk27-${{ hashFiles('scripts/build-libnode-android.sh') }}
+          restore-keys: libnode-v18.20.4-ndk27-
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.12.0'
