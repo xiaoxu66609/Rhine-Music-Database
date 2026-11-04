@@ -13,7 +13,9 @@ permissions:
   contents: write
 
 concurrency:
-  group: publish-${{ inputs.tag }}
+  # 0.4.2 与 v0.4.2 是同一次发布。分组必须用规范化 tag，否则两条 workflow
+  # 会同时进入 desktop.yml，而那边的 cancel-in-progress 会取消另一边的构建。
+  group: publish-${{ startsWith(inputs.tag, 'v') && inputs.tag || format('v{0}', inputs.tag) }}
   cancel-in-progress: false
 
 jobs:
