@@ -308,6 +308,9 @@ void Engine::trimMemory() {
     host.trimMemory(retainedImages);
     scene.trimMemory();
 }
+void Engine::pausePanelPlayback() {
+    app->music.player.setPaused(true);
+}
 /** 播放栏按需重绘时保持资源库休眠；只有可见的旋转或歌词动画需要连续调度。 */
 void Engine::refreshPlayback() {
     if (!m_visible) {

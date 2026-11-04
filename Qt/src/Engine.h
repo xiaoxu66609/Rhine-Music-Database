@@ -91,6 +91,8 @@ class Engine : public QObject {
         return m_musicTextures;
     }
     void trimMemory();
+    /** Android 无后台媒体服务：离开前台时暂停面板内播放。 */
+    void pausePanelPlayback();
 #ifdef Q_OS_DARWIN
     RhineRender::RenderConfiguration renderConfiguration;
     RhineRender::RenderTelemetry renderTelemetry;

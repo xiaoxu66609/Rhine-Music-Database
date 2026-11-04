@@ -90,6 +90,10 @@ function clonePinnedRelease({ url, tag, commit, tree, run, spawn = spawnSync }) 
     return revision;
 }
 
+function ffmpegReleaseTreeReady(tree) {
+    return fs.existsSync(path.join(tree, 'configure')) && !fs.existsSync(path.join(tree, '.git'));
+}
+
 /** 取出官方源码树：优先使用校验通过的发布包，下载失败时克隆锁定 tag。 */
 function acquireFfmpegTree({ directory, version, download, sha256, repository, tag, commit, run, spawn }) {
     const archive = path.join(directory, `ffmpeg-${version}.tar.xz`);
@@ -119,6 +123,9 @@ function acquireFfmpegTree({ directory, version, download, sha256, repository, t
         }
     }
     ensureReleaseTree({ archive, tree, hash, run });
+    if (!ffmpegReleaseTreeReady(tree)) {
+        throw new Error(`FFmpeg release tree is incomplete after extracting ${archive}`);
+    }
     return {
         tree,
         provenance: { kind: 'release', download, sha256: hash },
@@ -129,6 +136,7 @@ module.exports = {
     releaseCurlArguments,
     downloadVerifiedArchive,
     clonePinnedRelease,
+    ffmpegReleaseTreeReady,
     acquireFfmpegTree,
     releaseTreeMarker,
 };
