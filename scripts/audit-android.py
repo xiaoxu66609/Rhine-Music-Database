@@ -49,7 +49,7 @@ def find_readelf():
     return shutil.which("llvm-readelf") or shutil.which("readelf")
 
 
-def max_load_alignment(elf_path: pathlib.Path) -> int:
+def min_load_alignment(elf_path: pathlib.Path) -> int:
     readelf = find_readelf()
     if not readelf:
         raise SystemExit("readelf or llvm-readelf is required to verify libnode.so page alignment")
@@ -66,14 +66,16 @@ def max_load_alignment(elf_path: pathlib.Path) -> int:
             aligns.append(int(token, 16))
     if not aligns:
         raise SystemExit(f"No LOAD segments found in {elf_path.name}")
-    return max(aligns)
+    return min(aligns)
 
 
 with zipfile.ZipFile(apk) as package:
     libnode = pathlib.Path(tempfile.gettempdir()) / "rhine-libnode-audit.so"
     libnode.write_bytes(package.read("lib/arm64-v8a/libnode.so"))
-    if max_load_alignment(libnode) < 16384:
-        raise SystemExit("lib/arm64-v8a/libnode.so is not 16 KB ELF-aligned (required for targetSdk 36)")
+    if min_load_alignment(libnode) < 16384:
+        raise SystemExit(
+            "lib/arm64-v8a/libnode.so has a LOAD segment below 16 KB alignment (required for targetSdk 36)"
+        )
     libnode.unlink(missing_ok=True)
 
 def find_aapt():

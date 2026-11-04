@@ -10,7 +10,7 @@ fi
 NDK="$(cd "$1" && pwd)"
 OUTPUT="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 TAG="v18.20.4"
-SRC="${RHINE_NODE_MOBILE_SRC:-output/dependencies/nodejs-mobile-src}"
+SRC="${RHINE_NODE_MOBILE_SRC:-output/dependencies/node-mobile-android/nodejs-mobile-src}"
 JOBS="${RHINE_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
 SDK_API="${RHINE_NODE_MOBILE_SDK:-24}"
 
@@ -19,6 +19,48 @@ mkdir -p "$(dirname "$OUTPUT")"
 if [[ ! -f "${NDK}/build/cmake/android.toolchain.cmake" ]]; then
     echo "Invalid Android NDK: ${NDK}" >&2
     exit 1
+fi
+
+find_readelf() {
+    if [[ -n "${ANDROID_NDK_ROOT:-}" && -d "${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt" ]]; then
+        local host candidate
+        for host in "${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt"/*; do
+            candidate="${host}/bin/llvm-readelf"
+            if [[ -x "${candidate}" ]]; then
+                echo "${candidate}"
+                return 0
+            fi
+        done
+    fi
+    if command -v llvm-readelf >/dev/null 2>&1; then
+        command -v llvm-readelf
+        return 0
+    fi
+    if command -v readelf >/dev/null 2>&1; then
+        command -v readelf
+        return 0
+    fi
+    return 1
+}
+
+elf_meets_16kb_load_alignment() {
+    local elf="$1"
+    local readelf
+    readelf="$(find_readelf)" || return 1
+    while read -r align; do
+        if [[ "${align}" =~ ^0x[0-9a-fA-F]+$ ]]; then
+            value=$((align))
+            if (( value < 16384 )); then
+                return 1
+            fi
+        fi
+    done < <("${readelf}" -lW "${elf}" | awk '/^  LOAD/ {print $NF}')
+    return 0
+}
+
+if [[ -f "${OUTPUT}" ]] && elf_meets_16kb_load_alignment "${OUTPUT}"; then
+    echo "Reusing cached 16 KB-aligned libnode.so: ${OUTPUT}"
+    exit 0
 fi
 
 if [[ ! -d "${SRC}/.git" ]]; then
@@ -55,24 +97,12 @@ fi
 
 cp "${BUILT}" "${OUTPUT}"
 
-if ! command -v readelf >/dev/null 2>&1; then
+if elf_meets_16kb_load_alignment "${OUTPUT}"; then
+    echo "Built 16 KB-aligned libnode.so: ${OUTPUT}"
+elif ! find_readelf >/dev/null 2>&1; then
     echo "readelf missing; skipped ELF alignment verification" >&2
     exit 0
-fi
-
-misaligned=0
-while read -r align; do
-    if [[ "${align}" =~ ^0x[0-9a-fA-F]+$ ]]; then
-        value=$((align))
-        if (( value < 16384 )); then
-            misaligned=1
-        fi
-    fi
-done < <(readelf -lW "${OUTPUT}" | awk '/^  LOAD/ {print $NF}')
-
-if (( misaligned != 0 )); then
+else
     echo "Built libnode.so is not 16 KB aligned" >&2
     exit 1
 fi
-
-echo "Built 16 KB-aligned libnode.so: ${OUTPUT}"
