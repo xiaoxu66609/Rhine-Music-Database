@@ -416,9 +416,9 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: |
-            output/dependencies/nodejs-mobile-src
+            output/dependencies/node-mobile-android/nodejs-mobile-src
             output/dependencies/node-mobile-android/bin/arm64-v8a/libnode.so
-          key: libnode-v18.20.4-ndk27-${{ hashFiles('scripts/build-libnode-android.sh') }}
+          key: libnode-v18.20.4-ndk27-${{ hashFiles('scripts/build-libnode-android.sh', 'scripts/audit-android.py') }}
           restore-keys: libnode-v18.20.4-ndk27-
       - uses: jurplel/install-qt-action@v4
         with:
