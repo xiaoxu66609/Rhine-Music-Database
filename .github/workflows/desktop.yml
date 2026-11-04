@@ -450,7 +450,8 @@ jobs:
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.12.0'
-          host: linux
+          # Qt 6.7+ 的 Android 包在 aqt 的 all_os 主机下发布，linux android 列表止于 6.7.3。
+          host: all_os
           target: android
           arch: android_arm64_v8a
           aqtsource: git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7
