@@ -125,5 +125,40 @@ assert.throws(
         }),
     /expected a{40}/,
 );
+
+const releaseDir = path.join(root, 'release-reextract');
+const releaseTree = path.join(releaseDir, 'ffmpeg-9.0.1');
+const releaseArchive = path.join(releaseDir, 'ffmpeg-9.0.1.tar.xz');
+fs.mkdirSync(path.join(releaseTree, '.git'), { recursive: true });
+fs.writeFileSync(path.join(releaseTree, 'configure'), 'git-fallback');
+fs.writeFileSync(releaseArchive, payload);
+const reextracted = acquireFfmpegTree({
+    directory: releaseDir,
+    version: '9.0.1',
+    download: source.download,
+    sha256,
+    repository: 'https://github.com/FFmpeg/FFmpeg.git',
+    tag: 'n9.0.1',
+    commit,
+    run(command, commandArgs) {
+        if (command === 'tar') {
+            fs.rmSync(releaseTree, { recursive: true, force: true });
+            fs.mkdirSync(releaseTree, { recursive: true });
+            fs.writeFileSync(path.join(releaseTree, 'configure'), 'release');
+        }
+        if (command === 'curl') {
+            throw new Error('curl should not run when archive already exists');
+        }
+        assert.notEqual(command, 'git');
+    },
+    spawn() {
+        throw new Error('git fallback should not run when archive exists');
+    },
+});
+assert.equal(reextracted.provenance.kind, 'release');
+assert.equal(fs.readFileSync(path.join(releaseTree, 'configure'), 'utf8'), 'release');
+assert.equal(fs.existsSync(path.join(releaseTree, '.git')), false);
+console.log('Pinned FFmpeg release archives replace leftover git fallback trees');
+
 fs.rmSync(root, { recursive: true, force: true });
 console.log('FFmpeg download failure falls back to the pinned tag and rejects a moved tag');

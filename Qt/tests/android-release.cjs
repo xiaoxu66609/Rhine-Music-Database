@@ -20,3 +20,7 @@ if (result.status !== 0) {
     process.exit(result.status || 1);
 }
 process.stdout.write(result.stdout);
+
+const mainCpp = fs.readFileSync(path.join(__dirname, '../src/main.cpp'), 'utf8');
+assert.match(mainCpp, /configureAndroidWindow\(/);
+console.log('Android pauses in-app playback when the activity leaves the foreground');

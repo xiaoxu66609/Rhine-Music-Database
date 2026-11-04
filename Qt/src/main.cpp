@@ -719,6 +719,9 @@ int main(int argc, char **argv) {
 #ifdef Q_OS_IOS
     configureIOSWindow(window, backend.get());
 #endif
+#ifdef Q_OS_ANDROID
+    configureAndroidWindow(window, backend.get());
+#endif
     window->installEventFilter(backend.get());
     profiler->attach(window);
 #if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
