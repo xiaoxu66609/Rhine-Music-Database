@@ -56,8 +56,28 @@ function downloadVerifiedArchive({ url, sha256, destination, run }) {
     return hash;
 }
 
-function clonePinnedRelease({ url, tag, commit, tree, run, spawn = spawnSync }) {
+const releaseTreeMarker = '.rhine-ffmpeg-release.sha256';
+
+function removeFfmpegTree(tree) {
     fs.rmSync(tree, { recursive: true, force: true });
+}
+
+function ensureReleaseTree({ archive, tree, hash, run }) {
+    const marker = path.join(tree, releaseTreeMarker);
+    if (
+        fs.existsSync(path.join(tree, 'configure')) &&
+        fs.existsSync(marker) &&
+        fs.readFileSync(marker, 'utf8') === hash
+    ) {
+        return;
+    }
+    removeFfmpegTree(tree);
+    run('tar', ['-xf', archive]);
+    fs.writeFileSync(path.join(tree, releaseTreeMarker), hash);
+}
+
+function clonePinnedRelease({ url, tag, commit, tree, run, spawn = spawnSync }) {
+    removeFfmpegTree(tree);
     run('git', ['clone', '--depth', '1', '--branch', tag, url, tree]);
     const result = spawn('git', ['-C', tree, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
     if (result.error || result.status !== 0) {
@@ -81,6 +101,7 @@ function acquireFfmpegTree({ directory, version, download, sha256, repository, t
         if (hash !== sha256) {
             console.warn('Discarding FFmpeg archive that does not match the pinned checksum');
             fs.rmSync(archive, { force: true });
+            removeFfmpegTree(tree);
             hash = null;
         }
     }
@@ -97,9 +118,7 @@ function acquireFfmpegTree({ directory, version, download, sha256, repository, t
             };
         }
     }
-    if (!fs.existsSync(tree)) {
-        run('tar', ['-xf', archive]);
-    }
+    ensureReleaseTree({ archive, tree, hash, run });
     return {
         tree,
         provenance: { kind: 'release', download, sha256: hash },
@@ -111,4 +130,5 @@ module.exports = {
     downloadVerifiedArchive,
     clonePinnedRelease,
     acquireFfmpegTree,
+    releaseTreeMarker,
 };

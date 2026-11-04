@@ -1,7 +1,11 @@
 name: Platform build
 
 on:
+  # 功能分支只走 pull_request，避免 push 与 PR 各跑一遍 Platform build，
+  # 在 macOS 并发上限下互相挤占 runner 并以 cancelled 结束。
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
   workflow_call:

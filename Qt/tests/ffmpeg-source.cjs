@@ -7,6 +7,7 @@ const {
     acquireFfmpegTree,
     downloadVerifiedArchive,
     releaseCurlArguments,
+    releaseTreeMarker,
 } = require('../../scripts/ffmpeg-source.cjs');
 
 const source = require('../../vendor/ffmpeg/source.json');
@@ -125,5 +126,45 @@ assert.throws(
         }),
     /expected a{40}/,
 );
+
+const staleRoot = path.join(root, 'stale-tree');
+const staleDirectory = path.join(staleRoot, 'dir');
+const staleTree = path.join(staleDirectory, 'ffmpeg-9.0.1');
+fs.mkdirSync(staleTree, { recursive: true });
+fs.writeFileSync(path.join(staleTree, 'configure'), '#!/bin/sh\n');
+fs.writeFileSync(path.join(staleTree, 'stale.txt'), 'git fallback tree');
+const staleArchive = path.join(staleDirectory, 'ffmpeg-9.0.1.tar.xz');
+fs.writeFileSync(staleArchive, payload);
+const staleCalls = [];
+acquireFfmpegTree({
+    directory: staleDirectory,
+    version: '9.0.1',
+    download: source.download,
+    sha256,
+    repository: 'https://github.com/FFmpeg/FFmpeg.git',
+    tag: 'n9.0.1',
+    commit,
+    run(command, commandArgs) {
+        staleCalls.push([command, commandArgs]);
+        if (command === 'tar') {
+            fs.rmSync(staleTree, { recursive: true, force: true });
+            fs.mkdirSync(staleTree, { recursive: true });
+            fs.writeFileSync(path.join(staleTree, 'configure'), '#!/bin/sh\n');
+            fs.writeFileSync(path.join(staleTree, 'from-tarball.txt'), 'release tree');
+        }
+    },
+});
+assert.equal(fs.readFileSync(path.join(staleTree, 'from-tarball.txt'), 'utf8'), 'release tree');
+assert.equal(fs.existsSync(path.join(staleTree, 'stale.txt')), false);
+assert.equal(
+    fs.readFileSync(path.join(staleTree, releaseTreeMarker), 'utf8'),
+    sha256,
+);
+assert.deepEqual(
+    staleCalls.filter(([command]) => command === 'tar'),
+    [['tar', ['-xf', staleArchive]]],
+);
+console.log('Verified FFmpeg release archives replace stale source trees');
+
 fs.rmSync(root, { recursive: true, force: true });
 console.log('FFmpeg download failure falls back to the pinned tag and rejects a moved tag');
