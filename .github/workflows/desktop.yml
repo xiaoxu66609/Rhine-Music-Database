@@ -355,9 +355,10 @@ jobs:
 
   ios:
     name: iOS arm64 (unsigned)
-    # 与 macOS 桌面构建并行时会各占一个 macos-15 runner；在容量紧张时两个 job
-    # 都可能排队超过 hosted runner 分配窗口并以 cancelled 结束。等 build 矩阵完成后再跑 iOS。
+    # 等 build 矩阵（含 macOS）结束后再占 macos-15；与 macOS 共用 rhine-macos-15-hosted 并发组。
+    # iOS 不依赖桌面产物，Linux/Windows 失败时仍应产出 ios-unsigned.ipa；整次运行被取消则跳过。
     needs: build
+    if: ${{ always() && !cancelled() }}
     runs-on: macos-15
     concurrency:
       group: rhine-macos-15-hosted-${{ github.repository }}
