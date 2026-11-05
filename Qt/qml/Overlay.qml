@@ -30,6 +30,7 @@ Item {
     readonly property var chromeHostWindow: windows && controlledHost ? rhineHostWindow : hostWindow
     property bool frameless: controlledHost && Qt.platform.os === "windows"
     readonly property bool ios: Qt.platform.os === "ios"
+    readonly property bool touchInput: ios || Qt.platform.os === "android"
 
     // 原 Main.qml 直接引用组件内部的 id，拆层后改为函数调用，效果等价。
     function focusInputLayer() {
@@ -158,12 +159,12 @@ Item {
                     onEntered: rhine.pointer("pointerleave", 0, 0)
                     onPressed: {
                         inputLayer.forceActiveFocus();
-                        if (!overlay.ios) {
+                        if (!overlay.touchInput) {
                             rhine.action(modelData.action);
                         }
                     }
                     onClicked: {
-                        if (overlay.ios) {
+                        if (overlay.touchInput) {
                             rhine.action(modelData.action);
                         }
                     }

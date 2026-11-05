@@ -13,6 +13,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const { acquireFfmpegTree } = require('./ffmpeg-source.cjs');
 const source = require('../vendor/ffmpeg/source.json');
 const root = path.resolve(__dirname, '..');
 const directory = path.join(root, 'output/dependencies/ffmpeg-linux');
@@ -36,7 +37,7 @@ function capture(command, args, cwd = directory) {
     return result.stdout;
 }
 
-/** 取出源码：优先 submodule，其次按锁定校验和下载发布包。 */
+/** 取出源码：优先 submodule，其次按锁定校验和下载发布包；下载失败时克隆锁定 tag。 */
 function prepareSourceTree() {
     // submodule 只作为快速克隆使用，源码保持上游原样：提交与锁定值不一致或工作树有改动时，
     // 一律回退到发布包，保证构建产物可复现。
@@ -57,23 +58,16 @@ function prepareSourceTree() {
             };
         }
     }
-    const archive = path.join(directory, `ffmpeg-${source.version}.tar.xz`);
-    fs.mkdirSync(directory, { recursive: true });
-    if (!fs.existsSync(archive)) {
-        run('curl', ['-L', '--fail', '--retry', '3', source.download, '-o', archive]);
-    }
-    const hash = createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
-    if (hash !== source.sha256) {
-        throw new Error('FFmpeg source checksum mismatch');
-    }
-    const tree = path.join(directory, `ffmpeg-${source.version}`);
-    if (!fs.existsSync(tree)) {
-        run('tar', ['-xf', archive]);
-    }
-    return {
-        tree,
-        provenance: { kind: 'release', download: source.download, sha256: hash },
-    };
+    return acquireFfmpegTree({
+        directory,
+        version: source.version,
+        download: source.download,
+        sha256: source.sha256,
+        repository: source.submodule.url,
+        tag: source.submodule.tag,
+        commit: source.submodule.commit,
+        run,
+    });
 }
 
 // 解码器白名单：只有音频解码器，清单由源码的类型标注生成（见文件内 $comment）。
