@@ -1,6 +1,5 @@
 #include "PlatformAndroid.h"
 #include "AppStorage.h"
-#include "Engine.h"
 #include "Host.h"
 #include <QDebug>
 #include <QDir>
@@ -8,8 +7,6 @@
 #include <QFile>
 #include <QFileDevice>
 #include <QFileInfo>
-#include <QGuiApplication>
-#include <QQuickWindow>
 #include <QStandardPaths>
 
 namespace {
@@ -100,19 +97,4 @@ void platformDeleteCredential() {
 
 void platformPlay(const QString &, bool, std::function<void(QString)> done) {
     done(QStringLiteral("Android 仅支持面板内播放"));
-}
-
-void configureAndroidWindow(QWindow *window, Engine *backend) {
-    QObject::connect(qGuiApp, &QGuiApplication::applicationStateChanged, backend,
-                     [backend, window](Qt::ApplicationState state) {
-                         const bool active = state == Qt::ApplicationActive;
-                         backend->setVisible(active);
-                         if (!active) {
-                             backend->pausePanelPlayback();
-                             backend->trimMemory();
-                             if (auto *quick = qobject_cast<QQuickWindow *>(window)) {
-                                 quick->releaseResources();
-                             }
-                         }
-                     });
 }
