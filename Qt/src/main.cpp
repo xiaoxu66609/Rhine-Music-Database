@@ -18,6 +18,7 @@
 #include "PlaybackConnection.h"
 #endif
 #ifdef Q_OS_ANDROID
+#include "AndroidWindow.h"
 #include "PlatformAndroid.h"
 #endif
 #ifdef Q_OS_MACOS

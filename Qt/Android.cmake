@@ -32,6 +32,7 @@ set_target_properties(RhineNodeMobile PROPERTIES IMPORTED_LOCATION "${nodeLibrar
 find_library(RHINE_ANDROID_LOG log REQUIRED)
 target_link_libraries(RhineCore PUBLIC RhineNodeMobile ${RHINE_ANDROID_LOG})
 set_property(TARGET RhineMusicDatabase APPEND PROPERTY QT_ANDROID_EXTRA_LIBS "${nodeLibrary}")
+target_sources(RhineMusicDatabase PRIVATE "${CMAKE_SOURCE_DIR}/Qt/src/AndroidWindow.cpp")
 set_target_properties(
     RhineMusicDatabase
     PROPERTIES QT_ANDROID_PACKAGE_SOURCE_DIR "${RHINE_ANDROID_PACKAGE_SOURCE}"

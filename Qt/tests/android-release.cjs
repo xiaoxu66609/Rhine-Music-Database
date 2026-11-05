@@ -22,5 +22,7 @@ if (result.status !== 0) {
 process.stdout.write(result.stdout);
 
 const mainCpp = fs.readFileSync(path.join(__dirname, '../src/main.cpp'), 'utf8');
+const androidWindow = fs.readFileSync(path.join(__dirname, '../src/AndroidWindow.cpp'), 'utf8');
 assert.match(mainCpp, /configureAndroidWindow\(/);
+assert.match(androidWindow, /pausePanelPlayback/);
 console.log('Android pauses in-app playback when the activity leaves the foreground');
