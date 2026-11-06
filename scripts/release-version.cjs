@@ -37,4 +37,13 @@ function packageIdentity(version = buildVersion()) {
     return version.release ? `v${version.version}` : version.commitSha;
 }
 
-module.exports = { buildVersion, packageIdentity, distributionPlatforms };
+/** Canonical GitHub release tag: vMAJOR.MINOR.PATCH (accepts input with or without v). */
+function normalizeReleaseTag(value) {
+    const built = buildVersion(String(value).trim());
+    if (!built.release) {
+        throw new Error('Release version must use vMAJOR.MINOR.PATCH, e.g. v1.0.0');
+    }
+    return `v${built.version}`;
+}
+
+module.exports = { buildVersion, packageIdentity, normalizeReleaseTag, distributionPlatforms };

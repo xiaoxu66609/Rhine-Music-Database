@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
-const { buildVersion, distributionPlatforms } = require('./release-version.cjs');
+const { normalizeReleaseTag, distributionPlatforms } = require('./release-version.cjs');
 
 /** 通过独立参数调用 GitHub CLI */
 function githubApi(method, endpoint, body, file) {
@@ -28,7 +28,9 @@ function validateOptions({ repository, tag, sha }) {
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
         throw new Error('Invalid repository');
     }
-    if (!/^v/.test(tag) || 'v' + buildVersion(tag).version !== tag) {
+    try {
+        normalizeReleaseTag(tag);
+    } catch {
         throw new Error('Use a stable release tag such as v1.0.0');
     }
     if (!/^[0-9a-f]{40}$/.test(sha)) {
@@ -154,7 +156,7 @@ if (require.main === module) {
     try {
         const options = {
             repository: process.env.GITHUB_REPOSITORY,
-            tag: process.env.RELEASE_TAG,
+            tag: normalizeReleaseTag(process.env.RELEASE_TAG),
             sha: process.env.SOURCE_SHA,
             directory: 'release',
         };

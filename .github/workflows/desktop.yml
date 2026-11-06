@@ -1,7 +1,11 @@
 name: Platform build
 
 on:
+  # 功能分支只走 pull_request，避免 push 与 PR 各跑一遍 Platform build，
+  # 在 macOS 并发上限下互相挤占 runner 并以 cancelled 结束。
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -15,7 +19,8 @@ permissions:
 
 concurrency:
   group: desktop-${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_version || 'development' }}
-  cancel-in-progress: true
+  # pull_request / workflow_call 排队即可；push 才取消同 ref 上的旧运行。
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   build:
@@ -33,6 +38,8 @@ jobs:
             node-platform: darwin-arm64
             artifact: macOS-arm64
             distribution: '*.zip'
+            build-ios: true
+            timeout: 90
           - name: Linux x86_64
             os: ubuntu-24.04
             qt-arch: linux_gcc_64
@@ -55,6 +62,12 @@ jobs:
             distribution: 'Windows-x64-Setup.exe'
             timeout: 120
     runs-on: ${{ matrix.os }}
+    concurrency:
+      # 全仓库共用一个 macos-15 槽位，避免多路 PR 同时抢 runner 后在分配窗口内 cancelled。
+      # 默认 queue: single 只允许 1 个 pending，第三个入队会取消第二个 pending job（含 iOS 步骤）。
+      group: ${{ matrix.os == 'macos-15' && format('rhine-macos-15-hosted-{0}', github.repository) || format('desktop-matrix-{0}-{1}', github.run_id, matrix.name) }}
+      cancel-in-progress: false
+      queue: max
     env:
       NODE_VERSION: '26.11.1'
       RHINE_BUILD_TYPE: Release
@@ -343,36 +356,9 @@ jobs:
           name: RHINE-MUSIC-DATABASE-${{ matrix.artifact }}
           path: output/RhineMusicDatabase-${{ inputs.release_version || '*' }}-${{ matrix.distribution }}
           if-no-files-found: error
-
-  ios:
-    name: iOS arm64 (unsigned)
-    runs-on: macos-15
-    timeout-minutes: 45
-    env:
-      RHINE_VERSION: ${{ inputs.release_version || '' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.14.0'
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            MusicBridge/package-lock.json
-      - name: Select Xcode with MetalFX frame interpolation
-        run: bash scripts/select-xcode.sh
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      # 跨平台工具（qsb 等）由同版本桌面 kit 提供，设备库使用独立 iOS kit。
+      # 与桌面 macOS 构建共用同一 macos-15 runner，避免单独 ios job 再次排队后在分配窗口内 cancelled。
       - uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.12.0'
-          arch: clang_64
-          aqtsource: git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7
-          modules: qtshadertools qtmultimedia
-          cache: true
-      - uses: jurplel/install-qt-action@v4
+        if: matrix.build-ios
         with:
           version: '6.12.0'
           target: ios
@@ -380,25 +366,13 @@ jobs:
           aqtsource: git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7
           modules: qtshadertools qtmultimedia
           cache: true
-      - name: Install build dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Use setup-node runtime for resource preparation
-        run: |
-          node - <<'JS' >> "$GITHUB_ENV"
-          const fs = require('node:fs');
-          const path = require('node:path');
-          const license = path.resolve(path.dirname(process.execPath), '../LICENSE');
-          if (!fs.existsSync(license)) {
-              throw new Error('Standalone Node license missing');
-          }
-          console.log('RHINE_NODE_BINARY=' + process.execPath);
-          console.log('RHINE_NODE_LICENSE=' + license);
-          JS
       - name: Build and audit unsigned IPA
+        if: matrix.build-ios
         run: npm run build:ios
         env:
           RHINE_IOS_QT: ${{ env.QT_ROOT_DIR }}
       - name: Upload unsigned IPA
+        if: matrix.build-ios
         uses: actions/upload-artifact@v4
         with:
           name: RHINE-MUSIC-DATABASE-iOS-arm64
