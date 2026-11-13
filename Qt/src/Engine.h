@@ -1,17 +1,24 @@
 #pragma once
+#include "Gamepad.h"
 #include "Glyphs.h"
 #include "Host.h"
 #include "NativeApplication.h"
+#include "render/FramePacingPolicy.h"
+#include "render/MusicTextureAdmission.h"
+#include "render/RenderPolicy.h"
 #ifdef Q_OS_DARWIN
 #include "render/RenderConfiguration.h"
 #include "fg/FgFrameTap.h"
 #endif
 #include <QElapsedTimer>
+#include <QSet>
 #include <QPointF>
+#include <QRectF>
 #include <QVariantMap>
 #include <QUrl>
 #include <QQuickWindow>
 #include <QPointer>
+#include <array>
 #include <atomic>
 class Engine : public QObject {
     Q_OBJECT
@@ -20,7 +27,7 @@ class Engine : public QObject {
     Q_PROPERTY(QVariantMap performance READ performance NOTIFY stateChanged)
   public:
     Engine(QString root, bool offline = false, QObject *parent = nullptr,
-           PlaybackConnection *connection = nullptr);
+           PlaybackConnection *connection = nullptr, RenderCacheStorage *renderCache = nullptr);
     ~Engine() override;
     QVariantMap state() const {
         return m_state;
@@ -39,16 +46,43 @@ class Engine : public QObject {
         // m_coverImage 在 GUI 线程的 update() 里同步，QImage 的隐式共享保证拷贝安全。
         return m_coverImage;
     }
-    QJsonArray commands() const {
+    /// 只在 GUI 线程、且在本帧绘制期间读取；`m_commands` 要到下一帧 `update()` 才会换，
+    /// 所以返回引用是安全的。按值返回每帧要多付几次原子引用计数往返。
+    const QJsonArray &commands() const {
         return m_commands;
     }
+    /// Android HUD 局部重绘：最近一次命令流变化对应的舞台矩形（1080 高度坐标系）。
+    QRectF hudDirtyStage() const {
+        return m_hudDirtyStage;
+    }
+    /// 命令流结构性变化（换页、换模式、出现变换命令）时为真，调用方必须整块重画。
+    bool hudDirtyFull() const {
+        return m_hudDirtyFull;
+    }
+#if defined(Q_OS_ANDROID)
+    /// 渲染线程在 Hud::updatePaintNode() 里确认「这一份 HUD 命令流已经画进纹理」。
+    /// 只做一次原子交换，不触碰 GUI 线程的任何状态。返回交换前的值，方便调用方
+    /// 只在真正清掉待呈现位时打一行诊断。
+    bool noteHudFramePainted() {
+        return m_hudFramePending.exchange(false, std::memory_order_relaxed);
+    }
+    /// 是否还有已发布但没被场景图消费的 HUD 帧。
+    bool hudFramePending() const {
+        return m_hudFramePending.load(std::memory_order_relaxed);
+    }
+#endif
     Glyphs *glyphs() {
         return &m_glyphs;
+    }
+    // 桌面歌词等 GUI 侧功能只通过这个访问器读播放器
+    MusicPlayer &player() {
+        return app->music.player;
     }
     QString root() const {
         return host.root;
     }
     Q_INVOKABLE void importLocal(QList<QUrl> urls);
+    Q_INVOKABLE void importPluginFolder(QUrl url);
     Q_INVOKABLE void setDownloadDirectory(QUrl url);
     Q_INVOKABLE void setDecryptDirectory(QUrl url);
     Q_INVOKABLE void decryptLocal(QList<QUrl> urls);
@@ -71,6 +105,9 @@ class Engine : public QObject {
     int frameIntervalMs() const;
     Q_INVOKABLE void query(QString query);
     Q_INVOKABLE void key(QString key, bool command);
+    Q_INVOKABLE void settingEditText(QString text);
+    Q_INVOKABLE void settingEditAccepted();
+    Q_INVOKABLE void settingEditCancel();
     Q_INVOKABLE void pointer(QString type, double x, double y);
     Q_INVOKABLE void wheel(double x, double y, double delta, bool pixels = false);
     Q_INVOKABLE void snapshot(QString path);
@@ -85,18 +122,42 @@ class Engine : public QObject {
     struct MusicTexture {
         QJsonObject item;
         QImage cover;
+        /// B01：这个 key 是否已经通过冷资源准入（焦点稳定 100ms）。渲染线程据此决定
+        /// 要不要创建标签／封面纹理；默认 true，让参考渲染与其他调用方不必关心准入。
+        bool admitted = true;
     };
     using MusicTextures = QHash<QString, MusicTexture>;
-    MusicTextures musicTextures() const {
-        return m_musicTextures;
+    /**
+     * C03：准入状态在 step() 里一次性写进快照，synchronize() 只做一次隐式共享的拷贝，
+     * 不再逐项重写 admitted（那样每帧都要为每个条目 detach 一遍 QHash 节点）。
+     */
+    const MusicTextures &musicTextures() const {
+        return m_musicTextureSnapshot;
+    }
+    /// 探针/诊断用：0 表示准入延迟已关闭。
+    int textureAdmissionDelayMs() const {
+        return m_admission.delayMs();
     }
     void trimMemory();
-    /** Android 无后台媒体服务：离开前台时暂停面板内播放。 */
-    void pausePanelPlayback();
 #ifdef Q_OS_DARWIN
     RhineRender::RenderConfiguration renderConfiguration;
     RhineRender::RenderTelemetry renderTelemetry;
     RhineFg::FrameInputs metalFxInputs;
+#endif
+#ifdef Q_OS_DARWIN
+    quint64 renderedFrames() const {
+        return m_renderFrames.load(std::memory_order_relaxed);
+    }
+    quint64 renderedGeometryFrames() const {
+        return m_renderGeometryFrames.load(std::memory_order_relaxed);
+    }
+    void recordGeometryFrame(quint64 revision) {
+        const auto previous = m_lastRenderedGeometry.exchange(revision, std::memory_order_relaxed);
+        if (revision != previous) {
+            m_renderGeometryFrames.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
 #endif
     void recordResourceRelease() {
         m_gpuResources.store(0, std::memory_order_relaxed);
@@ -114,16 +175,66 @@ class Engine : public QObject {
     // FSR 重置（画质切换、设备重建、分辨率变化）时调用：抖动归零、相位回到 0，
     // 并让下一帧携带 temporalReset 键，渲染器据此丢弃上一帧运动矢量历史。
     Q_INVOKABLE void resetTemporalState();
+#ifdef Q_OS_DARWIN
+    /** 渲染线程把 Apple 默认窗口的 MetalFX 补帧能力与计数转交 GUI 线程（设置页与性能面板读取）。 */
+    void publishFrameGenerationCapability(bool available, const QString &reason);
+    void publishFrameGenerationStats(quint64 presented, quint64 interpolated, quint64 rendered,
+                                     bool available, bool wanted, bool active, bool depthReady,
+                                     bool motionReady, QSize renderSize, QSize displaySize);
+#endif
+    /// 唤醒来源只影响诊断计数，不改变行为。
+    enum class WakeSource { Input, Host, Media, Other };
     void wake(bool input = true);
+    void wake(WakeSource source);
     void start();
+    /// A03：内容版本。呈现层用它代替"按信号重复置脏"——版本前进一次只重渲一层，
+    /// 重复推同一个值只在两个整数上比较一次。主线程写、渲染线程读，用 relaxed 原子
+    /// 即可：这里要的是"值变了/没变"，不是用它同步任何内存。
+    quint64 sceneRevision() const {
+        return m_sceneRevision.load(std::memory_order_relaxed);
+    }
+    quint64 hudRevision() const {
+        return m_hudRevision.load(std::memory_order_relaxed);
+    }
+    /// A03：渲染线程发现"新 GPU 资源已就位"（异步封面/模型上传完成）时，经队列连接
+    /// 回到主线程调用这里。这类变化在场景帧字段里看不出来，notifySceneRenderers 的
+    /// 自然触发点（帧签名比较）捕捉不到，只能由发现者自己上报一次。
+    Q_INVOKABLE void requestSceneContent();
+    /// C01：渲染线程在 synchronize() 里量到的"自定义快照同步"耗时。它不是 Qt Quick 的
+    /// sync 总时长，只是我们自己那一段，单独记才能分清钱花在哪。
+    void recordSceneSync(double ms) {
+        m_syncMicros.store(quint64(ms * 1000.0 + 0.5), std::memory_order_relaxed);
+        m_syncSamples.fetch_add(1, std::memory_order_relaxed);
+    }
+    /**
+     * C04：渲染线程在 synchronize() 里报告"这一份快照已被取走"。写入原子序号后经队列
+     * 回到主线程唤醒节拍；渲染线程不等 GUI，也不在这里做任何分配。
+     */
+    void noteSceneConsumed(quint64 revision);
+    /// 队列回调：主线程看到消费进度后，若有待办就立刻恢复节拍。
+    Q_INVOKABLE void sceneConsumed();
     void recordRender(quint64 resources, quint64 bindings = 0, quint64 textureBytes = 0,
-                      quint64 coverUploads = 0, quint64 drawCalls = 0) {
+                      quint64 coverUploads = 0, quint64 drawCalls = 0, double gpuTimeMs = 0,
+                      RhineRender::GpuTimingStatus gpuTiming = RhineRender::GpuTimingStatus::Unsupported) {
         m_renderFrames.fetch_add(1, std::memory_order_relaxed);
         m_gpuResources.store(resources, std::memory_order_relaxed);
         m_bindingCreations.fetch_add(bindings, std::memory_order_relaxed);
         m_musicTextureBytes.store(textureBytes, std::memory_order_relaxed);
         m_coverUploads.fetch_add(coverUploads, std::memory_order_relaxed);
         m_lastDrawCalls.store(drawCalls, std::memory_order_relaxed);
+        // 状态与数值必须分开传：同一个 0 ms 可能是"没请求""没样本"或"真的很快"，
+        // 只靠数值无法区分，而面板与 CSV 的诊断结论完全取决于这个区分（A01）。
+        m_gpuTiming.store(int(gpuTiming), std::memory_order_relaxed);
+        // 数值保留原有语义：0 不当作一次测量，避免用 0 覆盖掉上一个可信样本。
+        if (gpuTimeMs > 0) {
+            m_gpuTimeMicros.store(quint64(gpuTimeMs * 1000.0 + 0.5), std::memory_order_relaxed);
+            // C01：数值与样本数分开记——0 不是一次测量，窗口均值要用样本数做分母。
+            ++m_gpuSamples;
+        }
+        // A11：整帧资源账本必须在这里聚合。performance() 只看得到"最近一次快照"，
+        // 既无法判断峰值出现在哪一帧，也无法把"本帧新增绑定/上传"与累计值分开；
+        // 而 recordRender 是唯一同时拿到本帧全部资源入参的地方（渲染线程调用）。
+        noteFrameLedger(resources, bindings, textureBytes, coverUploads);
     }
     bool ready() const;
     int selfTest();
@@ -140,23 +251,117 @@ class Engine : public QObject {
     void clearCredentials();
     void performanceRequested();
     void localImportRequested(bool folder);
+    void pluginImportRequested();
     void downloadDirectoryRequested();
     void downloadDecryptRequested();
     void downloadDecryptFolderRequested();
     void downloadDecryptDirectoryRequested();
+    void mvRequested();
 
   protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
   private:
+    /// 按真实墙钟刷新详情淡入宽限期；tick() 开头与 step() 更新 m_frame 后都要调用。
+    void updateDetailGrace(qint64 nowMs);
+    /// 发布一份新的 HUD 命令流：置位「待呈现」并通知 Hud 标脏。
+    void publishHudFrame();
     void notifySceneRenderers(bool visualChanged);
+    void gamepadPressed(const QString &button);
+    Gamepad m_gamepad;
     quint64 m_geometryRevision = 0;
+    /// C04：发布／消费序号对账。m_sceneRevision 就是发布序号，渲染线程回填消费序号。
+    RhineRender::FramePacingPolicy m_pacing;
+    std::atomic<quint64> m_sceneConsumed{0};
+    /// 已经为哪个序号排过唤醒，避免渲染线程每帧都投递一次队列调用。
+    std::atomic<quint64> m_consumeNotified{0};
+    /// 输入优先于消费反馈：置位后下一次 tick 不跳过完整 step。
+    bool m_inputPending = false;
+    /// C03：准入状态随 musicTextures 一起在 GUI 线程生成，渲染线程只读这份快照。
+    MusicTextures m_musicTextureSnapshot;
+    /// C01：按来源分开计数，避免把"输入唤醒"和"Host 失效唤醒"混成一个数字。
+    quint64 m_wakesInput = 0, m_wakesHost = 0, m_wakesMedia = 0, m_wakesOther = 0;
+    /// C01：requestSceneContent 与 stableFrames 复位的次数／原因。
+    quint64 m_sceneRequests = 0;
+    quint64 m_stableResetInput = 0, m_stableResetScene = 0;
+    /// C04：被合并掉的完整 step。
+    quint64 m_stepsSkipped = 0;
+    /// C01：GPU 样本数（数值为 0 的成功采样不计数）。
+#ifdef Q_OS_DARWIN
+    std::atomic<quint64> m_gpuSamples{0};
+#else
+    quint64 m_gpuSamples = 0;
+#endif
+    /// 探针：唤醒次数与"场景真的变了"的拍数。空闲仍空转时，这两条决定往哪查。
+    quint64 m_wakes = 0;
+    quint64 m_changedSteps = 0;
+    /// A03：内容版本，只在内容真的变了时自增（见 notifySceneRenderers/requestSceneContent）。
+    std::atomic<quint64> m_sceneRevision{0};
+    std::atomic<quint64> m_hudRevision{0};
     std::atomic<quint64> m_renderFrames{0}, m_gpuResources{0};
+#ifdef Q_OS_DARWIN
+    std::atomic<quint64> m_lastRenderedGeometry{0};
+    std::atomic<quint64> m_renderGeometryFrames{0};
+#endif
     std::atomic<quint64> m_bindingCreations{0};
     std::atomic<quint64> m_musicTextureBytes{0};
     std::atomic<quint64> m_coverUploads{0};
     std::atomic<quint64> m_lastDrawCalls{0};
+    std::atomic<quint64> m_gpuTimeMicros{0};
+    // 存 int 而不是枚举：原子量只要一个字的读写，转回枚举时不必担心填充或对齐差异。
+    std::atomic<int> m_gpuTiming{int(RhineRender::GpuTimingStatus::Unsupported)};
+    std::atomic<quint64> m_syncMicros{0};
+    std::atomic<quint64> m_syncSamples{0};
+
+    // ---- A11 整帧资源账本 ----
+    // 口径（不要混用）：
+    //   resources   = 本帧驻留资源**个数**（RhiScene 把 resources/sized/transient 相加）；
+    //   textureBytes= 本帧驻留音乐纹理**字节**快照（不是本帧增量，见 RhiScene.cpp:1865）；
+    //   bindings    = 本帧新建 SRB 个数（RhiScene 已做差分）；
+    //   coverUploads= 本帧封面纹理上传**次数**（RhiScene 只提供次数，没有字节数）。
+    // 峰值窗口 = 最近 kLedgerWindow 个渲染帧的滚动最大值，不是"自启动以来的 lifetime
+    // 峰值"：启动期一次性上传会把 lifetime 峰值永久抬高，之后再贵也看不出来；滚动窗口
+    // 才能回答"当前这一段帧到底占多少"。窗口约 240 帧 ≈ 60fps 下 4 秒。
+    static constexpr int kLedgerWindow = 240;
+    struct LedgerSlot {
+        quint64 frame = 0;
+        quint64 resources = 0;
+        quint64 textureBytes = 0;
+    };
+    // 环形窗口只由渲染线程写（recordRender 的调用方），其他线程只读原子峰值。
+    std::array<LedgerSlot, kLedgerWindow> m_ledgerWindow{};
+    int m_ledgerCursor = 0;
+    int m_ledgerFilled = 0;
+    std::atomic<quint64> m_resourcesPeak{0};
+    std::atomic<quint64> m_resourcesPeakFrame{0};
+    std::atomic<quint64> m_textureBytesPeak{0};
+    std::atomic<quint64> m_textureBytesPeakFrame{0};
+    std::atomic<quint64> m_frameBindings{0};
+    std::atomic<quint64> m_frameCoverUploads{0};
+    // 每帧封面平均上传次数（EMA，千分整数发布）。用整数原子避免 std::atomic<double>
+    // 在 32 位目标上退化成锁；performance() 再除以 1000 还原。
+    std::atomic<quint64> m_coverUploadsPerFrameMilli{0};
+    // 写侧只在渲染线程累加，读侧不直接碰它。
+    double m_coverUploadsEma = 0.0;
+    // 预算告警只打一次：这个开关是诊断用的，每帧刷屏会淹没真正要看的日志。
+    std::atomic<bool> m_budgetWarned{false};
+    void noteFrameLedger(quint64 resources, quint64 bindings, quint64 textureBytes, quint64 coverUploads);
+    void recomputeLedgerPeaks();
+    // RHINE_RESOURCE_BUDGET_MB 解析结果（字节，0=关闭）。缓存成静态量：环境变量在进程
+    // 生命周期内不变，每帧重新 getenv 只会给渲染线程添无谓的字符串分配。
+    static quint64 resourceBudgetBytes();
     MusicTextures m_musicTextures;
+    // 归档页同时画多张唱片，非当前那些的封面图要单独向 Host 要（每个条目只在"成为当前"
+    // 的那一帧取过一次图，切歌瞬间往往还没解码完）。这里记已经发起过的 key，避免每帧
+    // 重复 loadCover 把同一张图反复排队；失败也留在集合里，不重试。
+    QSet<QString> m_coverRequests;
+    // B01：冷纹理准入。判定在纯逻辑类里（可离线测），定时器只负责到点喊一声。
+    // 计时基准是构造时启动的单调时钟，与帧号无关——引擎休眠不出帧时定时器照样到期。
+    RhineRender::MusicTextureAdmission m_admission = RhineRender::MusicTextureAdmission::fromEnvironment();
+    RhineRender::AdmissionScheduler m_admissionScheduler;
+    // 已 arm 的焦点代号：同一 key 的重复帧不能反复 start，否则到期时间被无限推后。
+    quint64 m_admissionArmed = 0;
+    void submitTextureAdmission(const QString &musicKey);
     Glyphs m_glyphs;
     QTimer timer, mediaTimer;
     bool m_started = false;
@@ -206,6 +411,31 @@ class Engine : public QObject {
     QVariantList m_hits;
     QJsonObject m_frame, m_current;
     QJsonArray m_commands;
+    /// 见 render/HudDirtyRect.h：Hud 只重画这块，纹理也只上传这块。
+    QRectF m_hudDirtyStage;
+    bool m_hudDirtyFull = true;
+#if defined(Q_OS_ANDROID)
+    /// HUD 命令流已发布、但渲染线程还没调过 Hud::updatePaintNode()。这段时间内
+    /// 引擎节拍必须让出 GUI 事件循环：0/1ms 的 QTimer 连轴转会把 Qt Quick 的
+    /// render sync 饿死，QQuickPaintedItem 标了脏却永远等不到 updatePaintNode /
+    /// commitTextureOperations，HUD 纹理就停在上一页（右侧详情卡片整块空白、
+    /// 按钮却在）。开唱片旋转能「治好」，正因为 rotationOnly 把节拍放到 33ms。
+    std::atomic<bool> m_hudFramePending{false};
+    qint64 m_hudFramePendingSinceMs = 0;
+#endif
+    /// 页面切换 / 详情过渡期间 HUD 必须连续刷新：pacing 的 Skip、引擎休眠与
+    /// step() 的 reuse 都会把这段动画整段吃掉（表现为「进详情时 HUD 不显示」）。
+    /// 开唱片旋转能绕过，是因为 m_discRotating 让 workPending 恒真；这里把过渡本身
+    /// 也纳入判据，不依赖那个设置。
+    QString m_hudPageMode;
+    bool m_hudPageViewer = false;
+    double m_hudPageDetail = -1;
+    qint64 m_hudTransitionUntilMs = 0;
+    /// 进入详情的真实墙钟时刻（clock.elapsed，不是会被休眠截断的 m_animationTime）。
+    /// 必须在 tick() 层判定：step() 一旦被 pacing Skip / 休眠跳过，写在 step() 里的
+    /// 过渡判据就永远不会执行，形成 scene.changed() 与 reuse 的循环依赖死锁。
+    qint64 m_detailEnterWallMs = -1;
+    bool m_detailGrace = false;
     QPointer<QWindow> m_window;
     QWindow::Visibility m_windowedVisibility = QWindow::Windowed;
     QString m_loginMethod;

@@ -1,7 +1,9 @@
 #pragma once
 #include <QtGlobal>
+#include "MobileTarget.h"
 #include <QHash>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QLocalSocket>
 #include <QObject>
 #include <functional>
@@ -10,7 +12,7 @@
 class PlaybackConnection : public QObject {
     Q_OBJECT
   public:
-    static constexpr int ProtocolVersion = 3;
+    static constexpr int ProtocolVersion = 4;
     using Reply = std::function<void(QJsonObject, QString)>;
     explicit PlaybackConnection(QObject *parent = nullptr);
     ~PlaybackConnection() override;
@@ -32,7 +34,9 @@ class PlaybackConnection : public QObject {
     void restartRequested();
 #endif
     void disconnected();
+    void storageInvalidated();
     void diagnosticEvent(QString event, QJsonObject values);
+    void spectrumChanged(QJsonArray levels);
 
   private:
     void readMessages();
@@ -45,7 +49,7 @@ class PlaybackConnection : public QObject {
     quint64 m_serial = 0;
 };
 
-#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
+#if !RHINE_MOBILE
 /**
  * 连接同一用户的唯一服务；没有运行时按需拉起后台 helper，
  * 并校验协议版本，避免新版界面连到旧版服务。

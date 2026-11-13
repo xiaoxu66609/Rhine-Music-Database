@@ -1,4 +1,5 @@
 #include "MusicLibrary.h"
+#include "ProviderRegistry.h"
 #include <QFileInfo>
 #include <algorithm>
 
@@ -7,7 +8,10 @@ void MusicLibrary::refreshLocal() {
     if (!isLocal()) {
         return;
     }
-    columns = {"本地检索", "全部歌曲", "文件夹", "本地专辑", "本地歌手"};
+    const auto descriptorColumns = ProviderRegistry::instance().columns("local");
+    if (!descriptorColumns.isEmpty()) {
+        columns = descriptorColumns;
+    }
     lists[1] = local->songs();
     lists[2] = local->collections("folder");
     lists[3] = local->collections("album");
@@ -35,13 +39,13 @@ void MusicLibrary::refreshLocal() {
             }
         }
         for (int index = int(player.queue.size()) - 1; index >= 0; --index) {
-            const auto track = player.queue.at(index).toObject();
+            const auto track = player.queue.at(index);
             const auto path = track["path"].toString();
             // GUI 重新连接时本地索引可能尚未恢复；仍可读的后台曲目不能因此被停止。
             const bool missing =
                 !indexed.contains(path) && (!host->playbackConnection() || !QFileInfo(path).isReadable());
             if (track["provider"] == "local" && missing) {
-                if (index == player.index) {
+                if (index == player.queue.index()) {
                     player.stop();
                     break;
                 }

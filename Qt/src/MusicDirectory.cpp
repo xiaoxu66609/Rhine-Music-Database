@@ -1,6 +1,7 @@
 #include "MusicLibrary.h"
 #include "MusicData.h"
 #include "MusicDiscover.h"
+#include "ProviderRegistry.h"
 #include <QRegularExpression>
 #include <algorithm>
 #include <cmath>
@@ -96,6 +97,22 @@ void MusicLibrary::enterDirectory(QJsonObject value) {
         changed();
         return;
     }
+    if (isSiren() && value["kind"] == "playlist" && value["localCollection"].toBool()) {
+        next->ids = QJsonArray::fromStringList(collections ? collections->tracks(value["id"].toString())
+                                                           : QStringList{});
+        next->songs = {};
+        next->cursor = 0;
+        next->albumsMore = false;
+        next->item["trackCount"] = int(next->ids.size());
+        directoryLoading = false;
+        if (next->ids.isEmpty()) {
+            status = QStringLiteral("歌单暂无可读取曲目");
+            changed();
+        } else {
+            loadDirectoryPage(std::optional<int>(0));
+        }
+        return;
+    }
     api.call(
         "detail", {value},
         [this, next, value](MusicReply result) {
@@ -157,7 +174,9 @@ bool MusicLibrary::openDaily() {
         {"virtual", true},
         {"id", "daily"},
         {"key", provider + ":playlist:daily"},
-        {"title", provider == "qq" ? QStringLiteral("每日 30 首") : QStringLiteral("每日推荐")},
+        {"title", ProviderRegistry::instance().text(provider, "dailyTitle").isEmpty()
+                      ? QStringLiteral("每日推荐")
+                      : ProviderRegistry::instance().text(provider, "dailyTitle")},
         {"artist", providerName()},
         {"cover", songs.first().toObject()["cover"].toString()},
         {"description", QStringLiteral("来自发现音乐的每日推荐，打开后不会同步到账号歌单。")},
@@ -436,7 +455,7 @@ void MusicLibrary::leaveDirectory(bool restore) {
 }
 
 /** 切歌沿用原物理选中与取出顺序，队列外曲目建立可返回的播放队列目录。 */
-void MusicLibrary::followPlayback(QJsonObject value) {
+void MusicLibrary::followPlayback(QJsonObject value, bool showDetails) {
     if (current.value("key") == value["key"] && current.value("id") == value["id"]) {
         return;
     }
@@ -446,6 +465,11 @@ void MusicLibrary::followPlayback(QJsonObject value) {
                               : frame["selected"].toInt(physicalSlots[selectedLane].value(0, -1));
     auto folder = directory;
     auto index = folder ? MusicData::indexOfId(folder->orderedSongs(), value["id"].toString()) : -1;
+    // 开启“切歌不打开详情”后，只有播放队列或已打开的曲目列表包含该曲目时才继续定位；
+    // 其他视图保持用户当前选择，不跳转，也不建立播放队列目录。显式打开详情仍会定位。
+    if (skipDetailOnSwitch && !showDetails && index < 0) {
+        return;
+    }
     if (index < 0) {
         ++m_directoryGeneration;
         directoryLoading = false;
@@ -456,12 +480,12 @@ void MusicLibrary::followPlayback(QJsonObject value) {
                         {"id", ""},
                         {"title", "播放队列"},
                         {"trackCount", player.queue.size()}};
-        folder->songs = player.queue;
-        for (const auto &song : player.queue) {
+        folder->songs = player.queue.items();
+        for (const auto &song : player.queue.items()) {
             folder->ids.append(song.toObject()["id"]);
         }
         folder->cursor = int(player.queue.size());
-        index = MusicData::indexOfId(player.queue, value["id"].toString());
+        index = player.queue.indexOfId(value["id"].toString());
         folder->index = index;
         const auto row = std::max(0, int(physicalSlots[selectedLane].indexOf(physical)));
         folder->anchor = selectedLane * 8 + row;
@@ -480,8 +504,9 @@ void MusicLibrary::followPlayback(QJsonObject value) {
     index = MusicData::indexOfId(folder->orderedSongs(), value["id"].toString());
     const auto cell = (index + folder->anchor) % 40;
     const auto target = physicalSlots[cell / 8].value(cell % 8, -1);
-    selectDirectory(index, "detail", target == physical ? "row" : "", target == physical ? 8 : 1);
-    if (!frame.isEmpty()) {
+    const QString mode = showDetails ? QStringLiteral("detail") : frame["mode"].toString("archive");
+    selectDirectory(index, mode, target == physical ? "row" : "", target == physical ? 8 : 1);
+    if (showDetails && !frame.isEmpty()) {
         frame["mode"] = "detail";
     }
 }

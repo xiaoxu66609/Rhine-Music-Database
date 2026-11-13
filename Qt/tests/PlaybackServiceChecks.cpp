@@ -9,7 +9,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
-#include <QMediaDevices>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QTemporaryDir>
@@ -109,6 +108,10 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
           "real helper accepts IPC handshake");
     check(connection->snapshot()["servicePid"].toInteger() == service.processId(),
           "playback owner is the separate helper process");
+    const auto storage = connection->call("storage.stats")["items"].toArray();
+    check(!storage.isEmpty(), "service provides a storage status");
+    const auto cleared = connection->call("storage.clearCaches")["items"].toArray();
+    check(cleared.size() >= 3, "service acknowledges each cache operation");
     connection->call("host.setProvider", {{"provider", "local"}});
     connection->call("player.volume", {{"value", 0}});
     connection->call("host.diagnostics", {{"enabled", true}});
@@ -122,31 +125,33 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
                                  {"url", QUrl::fromLocalFile(directory.path() + "/silence.wav").toString()}});
     }
     connection->call("player.play", {{"track", queue[0]}, {"source", queue}});
+    connection->call("player.loadQueue", {{"ids", QJsonArray{}}, {"known", queue}});
+    check(waitFor([&] {
+              connection->call("hello");
+              const auto snapshot = connection->snapshot();
+              return snapshot["queue"].toArray().size() == 3 && snapshot["index"].toInt(-1) == 0 &&
+                     snapshot["current"].toObject()["id"] == "0";
+          }),
+          "queue load command preserves the playback service queue");
     connection->call("player.mode", {{"value", "off"}});
-    const bool output = !QMediaDevices::defaultAudioOutput().isNull();
-    if (output) {
-        check(waitFor([&] {
-                  connection->call("hello");
-                  return connection->snapshot()["state"].toObject()["position"].toDouble() > 0;
-              }),
-              "service consumes real audio before GUI starts");
-        connection->call("player.pause", {{"paused", true}});
-        check(waitFor([&] {
-                  connection->call("hello");
-                  return !connection->snapshot()["state"].toObject()["requested"].toBool();
-              }),
-              "pause reaches the playback service");
-        connection->call("player.toggle");
-        check(waitFor([&] {
-                  connection->call("hello");
-                  return connection->snapshot()["state"].toObject()["requested"].toBool();
-              }),
-              "resume reaches the playback service");
-    } else {
-        connection->call("player.pause", {{"paused", true}});
-        check(!connection->snapshot()["state"].toObject()["requested"].toBool(),
-              "pause remains available without an audio device");
-    }
+    // 应用包自检校验服务的播放意图和 IPC，设备实际消耗由音频回归覆盖。
+    check(waitFor([&] {
+              connection->call("hello");
+              return connection->snapshot()["state"].toObject()["requested"].toBool();
+          }),
+          "play request reaches the service before GUI starts");
+    connection->call("player.pause", {{"paused", true}});
+    check(waitFor([&] {
+              connection->call("hello");
+              return !connection->snapshot()["state"].toObject()["requested"].toBool();
+          }),
+          "pause reaches the playback service");
+    connection->call("player.toggle");
+    check(waitFor([&] {
+              connection->call("hello");
+              return connection->snapshot()["state"].toObject()["requested"].toBool();
+          }),
+          "resume reaches the playback service");
     auto launchGui = [&](QProcess &process, const QStringList &extra) {
         auto environment = QProcessEnvironment::systemEnvironment();
         environment.insert("RHINE_RESOURCES", resources);

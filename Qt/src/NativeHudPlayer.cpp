@@ -1,142 +1,84 @@
 #include "NativeHud.h"
 #include "MusicData.h"
+#include "PlayerBar.h"
+#include "PlaybackQueueCard.h"
 #include <algorithm>
 
-void NativeHud::playerBar(double, double y, double width) {
+/** 适配播放业务快照；状态栏组件不感知账号、歌词页面或播放器生命周期。 */
+void NativeHud::playerBar(double x, double y, double width) {
     const auto &player = m_music->player;
-    const auto first = hits.size();
-    const auto center = width / 2;
-    auto shade = ink();
-    shade[3] = 0.12;
-    fill(0, y, width, 1080 - y,
-         dark ? QJsonArray{0.075, 0.085, 0.075, 1} : QJsonArray{0.929, 0.922, 0.894, 1});
-    const auto duration = player.state["duration"].toDouble();
-    const auto position = duration != 0 ? std::min(1.0, player.state["position"].toDouble() / duration) : 0;
-    fill(0, y, width, 3, shade);
-    fill(0, y, width * position, 3, {119.0 / 255, 123.0 / 255, 96.0 / 255, 1});
-    playerSeekRect = QRectF(0, y, width, 12);
-    hit(0, y, width, 12, "player:open", "播放进度");
-    constexpr double coverX = 28;
-    const auto coverY = y + 17;
-    if (!player.coverImage.isEmpty()) {
-        image(player.coverImage, coverX, coverY, 64, 64);
-    } else {
-        op({"ellipse", shade, coverX, coverY, 64, 64});
-        op({"ellipse", ink(), coverX + 28, coverY + 28, 8, 8});
+    PlayerBar::State state;
+    state.title = player.current.value("title").toString();
+    state.artist = player.current.value("artist").toString();
+    state.album = player.current.value("album").toString();
+    state.cover = player.coverImage;
+    state.status = player.status;
+    state.mode = player.mode;
+    state.positionMs = player.state["position"].toDouble();
+    state.durationMs = player.state["duration"].toDouble();
+    state.volume = player.state["volume"].toDouble();
+    state.playing = player.state["playing"].toBool();
+    state.loading = player.loading;
+    state.failed = player.failed;
+    state.hasTrack = !player.current.isEmpty();
+    const auto liked = m_music->songLiked(player.current);
+    state.liked = liked.value_or(false);
+    state.likeKnown = liked.has_value();
+    state.canLike = state.hasTrack && (m_music->isSiren() || !m_music->uid.isEmpty()) &&
+                    !m_music->writeLoading && m_music->canMutate("/like") &&
+                    player.current.value("provider").toString(m_music->provider) == m_music->provider;
+    state.seekable = player.state["seekable"].toBool();
+    state.applicationVolume = PlatformFeatures::ApplicationVolume;
+    state.musicVideo = PlatformFeatures::MusicVideo;
+    if (m_responsive.compact()) {
+        m_responsive.setPlayer(state);
+        return;
     }
-    const auto infoWidth = std::max(120.0, center - 280 - 116);
-    auto title = player.failed ? player.status : player.current.value("title").toString();
-    if (title.isEmpty() && !player.failed) {
-        title = "尚未播放";
+    const auto drawing = PlayerBar::render(state, {x, y, width, PlayerBar::RowHeight}, dark, *m_glyphs);
+    for (const auto &command : drawing.commands) {
+        commands.append(command);
     }
-    centeredText(fit(title, 20, infoWidth, "demibold"), 116, y + 34, 20, "demibold");
-    auto artist = player.current.value("artist").toString();
-    if (artist.isEmpty()) {
-        artist = "RHINE LAB / MUSIC DATABASE";
+    for (const auto &target : drawing.hits) {
+        hits.append(target);
     }
-    centeredText(fit(artist, 15, infoWidth), 116, y + 64, 15);
-    hit(28, y + 17, std::max(200.0, center - 280 - 28), 64, "player:open", "当前歌曲 / 播放队列");
-    hit(center - 187, y + 20, 70, 44, "player:mode", "播放模式");
-    static const QHash<QString, QString> modes{
-        {"off", "顺序"}, {"all", "循环"}, {"one", "单曲"}, {"shuffle", "随机"}};
-    centeredText(modes.value(player.mode), center - 152, y + 42, 16, "regular", true);
-    hit(center - 99, y + 14, 44, 56, "player:prev", "上一首");
-    const auto cy = y + 42;
-    const QJsonArray icon{0.96, 0.95, 0.91, 1};
-    const auto path = [](std::initializer_list<QPointF> points, bool closed = false) {
-        QString value;
-        for (const auto &point : points) {
-            value += value.isEmpty() ? "M " : " L ";
-            value += QString::number(point.x(), 'g', 16) + " " + QString::number(point.y(), 'g', 16);
-        }
-        if (closed) {
-            value += " Z";
-        }
-        return value;
-    };
-    op({"path", path({{center - 72, cy - 10}, {center - 82, cy}, {center - 72, cy + 10}}), 3, ink(),
-        QJsonArray{}, 0});
-    op({"path", path({{center + 72, cy - 10}, {center + 82, cy}, {center + 72, cy + 10}}), 3, ink(),
-        QJsonArray{}, 0});
-    op({"ellipse", QJsonArray{119.0 / 255, 123.0 / 255, 96.0 / 255, 1}, center - 29, cy - 29, 58, 58});
-    hit(center - 29, cy - 29, 58, 58, "player:toggle", "播放 / 暂停");
-    if (player.loading) {
-        for (int index = -1; index <= 1; ++index) {
-            op({"ellipse", icon, center + index * 9 - 2, cy - 2, 4, 4});
-        }
-    } else if (player.state["playing"].toBool()) {
-        fill(center - 9, cy - 11, 6, 22, icon);
-        fill(center + 3, cy - 11, 6, 22, icon);
-    } else {
-        // 对齐播放键三角
-        const auto playCenter = center + 10.0 / 3;
-        op({"fill-path",
-            path({{playCenter - 10, cy - 12}, {playCenter + 10, cy}, {playCenter - 10, cy + 12}}, true),
-            icon});
-    }
-    hit(center + 55, y + 14, 44, 56, "player:next", "下一首");
-    const auto lyricsX = width * 0.591;
-    centeredText("歌词", lyricsX, cy, 15, lyricsMode ? "demibold" : "regular", true);
-    hit(lyricsX - 27, cy - 23, 54, 46, "player:lyrics", "当前歌曲歌词");
-    centeredText(clock(player.state["position"].toDouble()) + " / " + clock(duration), center, y + 84, 13,
-                 "regular", true);
-    if (PlatformFeatures::ApplicationVolume) {
-        const auto vx = width - 239;
-        playerVolumeRect = QRectF(vx, cy - 24, 86, 48);
-        centeredText("音量", vx - 54, cy, 15);
-        for (int index = 0; index < 10; ++index) {
-            const double height = 6 + index;
-            fill(vx + index * 9, cy - height / 2, 4, height,
-                 index / 10.0 < player.state["volume"].toDouble() ? ink() : shade);
-        }
-    } else {
-        playerVolumeRect = {};
-    }
-    hit(width - 103, cy - 24, 70, 48, "player:open", "播放队列");
-    centeredText("队列", width - 68, cy, 18, "regular", true);
-    for (auto index = first; index < hits.size(); ++index) {
-        auto value = hits.at(index).toObject();
-        value["fixed"] = true;
-        hits[index] = value;
-    }
+    playerBounds = drawing.inputBounds;
+    playerSeekRect = drawing.seek;
+    playerVolumeRect = drawing.volume;
 }
 
+/** 队列面板 */
 void NativeHud::playerPanel(double x, double y, double width) {
     const auto &player = m_music->player;
-    const auto left = x + 53;
-    const auto usable = width - 106;
-    rule(left, y + 216, usable);
-    auto title = player.current.value("title").toString();
-    if (title.isEmpty()) {
-        title = "选择歌曲开始播放";
+    queueOffset = std::clamp(queueOffset, 0, PlaybackQueueCard::maximumOffset(player.queue.size()));
+    PlaybackQueueCard::Model model;
+    model.bounds = {x, y, width, 836};
+    model.tracks = player.queue.items();
+    model.current = player.current;
+    model.cover = player.coverImage;
+    model.mode = player.mode;
+    model.status = player.status;
+    model.currentIndex = player.queue.indexOf(player.current);
+    model.offset = queueOffset;
+    model.playing = player.state["playing"].toBool();
+    model.dark = dark;
+    PlaybackQueueCard::Canvas canvas;
+    canvas.fill = [this](double left, double top, double w, double h, QJsonArray color) {
+        fill(left, top, w, h, color);
+    };
+    canvas.text = [this](QString value, double left, double top, double size, QString weight,
+                         QJsonArray color) { text(value, left, top, size, weight, 0, color); };
+    canvas.fit = [this](QString value, double size, double w, QString weight) {
+        return fit(value, size, w, weight);
+    };
+    canvas.hit = [this](double left, double top, double w, double h, QString action, QString label) {
+        hit(left, top, w, h, action, label);
+    };
+    canvas.image = [this](QString key, double left, double top, double w, double h) {
+        image(key, left, top, w, h);
+    };
+    if (m_responsive.compact()) {
+        m_responsive.setQueue(model);
+        return;
     }
-    limited(title, left, y + 240, 25, usable, "bold");
-    limited(player.current.value("artist").toString(), left, y + 278, 15, usable);
-    text("QUEUE / " + QString::number(player.queue.size()) + " 首", left, y + 326, 15);
-    button("清空待播", left + usable - 140, y + 311, 140, 44, "player:clear", 16);
-    queueOffset = std::min(queueOffset, std::max(0, int(player.queue.size()) - 7));
-    for (int row = 0; row < 7 && queueOffset + row < player.queue.size(); ++row) {
-        const auto index = queueOffset + row;
-        const auto song = player.queue.at(index).toObject();
-        const auto yy = y + 371 + row * 48;
-        text(index == player.index ? "▶" : MusicData::pad(index + 1), left, yy, 15);
-        button(fit(song["title"].toString(), 18, usable - 110), left + 44, yy - 7, usable - 110, 40,
-               "player:queue:" + QString::number(index), 18);
-        if (index != player.index) {
-            button("×", left + usable - 40, yy - 7, 40, 40, "player:remove:" + QString::number(index), 20);
-        }
-        rule(left, yy + 34, usable, 0.15);
-    }
-    limited(player.status, left, y + 730, 14, usable);
-    static const QHash<QString, QString> modes{
-        {"off", "顺序播放"}, {"all", "列表循环"}, {"one", "单曲循环"}, {"shuffle", "随机播放"}};
-    button(modes.value(player.mode), left, y + 761, 140, 44, "player:mode", 16);
-    if (PlatformFeatures::OfficialPlayback && !m_music->isLocal()) {
-        button(m_music->provider != "netease" ? m_music->providerName() + " ↗" : "官方客户端 ↗", left + 165,
-               y + 761, 175, 44, "player:official", 16);
-    }
-    if (m_music->canMutate("/like")) {
-        button(m_music->provider == "qq" ? "红心 / 切换" : "♡ 喜欢此曲", left + 365, y + 761, 140, 44,
-               "music:like-current", 16);
-    }
+    PlaybackQueueCard::paint(model, canvas);
 }

@@ -1,28 +1,34 @@
 # RHINE MUSIC DATABASE
 
-**基于莱茵生命终端的第三方网易云 / QQ / 酷狗音乐面板**
+**基于莱茵生命终端的音乐面板**
 
 这是对《明日方舟》特别映像「莱茵生命：访问」终端界面的非官方复刻
 
 使用 **Qt 6 / QML / C++** 构建
 
-面板支持检索、分组浏览、账号登录与 **播放**，同时保留网易云音乐官方客户端播放入口
+面板支持检索、分组浏览、账号登录与 **播放**。具体音乐来源由插件提供，可在插件市场安装、启用或卸载；
 
 ![面板总览](Assets/previews/panel.png)
 
-![曲目纵列（暗色）](Assets/previews/tabmode_dark.png)
+![歌曲详情](Assets/previews/detail.png)
 
-![歌曲详情与光盘盒（暗色）](Assets/previews/detail_dark.png)
+![同步歌词](Assets/previews/lyrics.png)
+
+![探索](Assets/previews/discover.png)
 
 ![歌手页与曲目列表](Assets/previews/list.png)
 
-![同步歌词](Assets/previews/lyrics.png)
+![曲目纵列（暗色）](Assets/previews/tabmode_dark.png)
+
+![歌曲详情（暗色）](Assets/previews/detail_dark.png)
 
 ![播放队列](Assets/previews/queue.png)
 
 ![面板设置](Assets/previews/settings.png)
 
 ## 快速运行
+
+Windows 和 macOS 可在「设置 → 全局快捷键 → 设置快捷键」中录入后台控制组合键，支持播放/暂停、上一首/下一首、音量、喜欢歌曲、桌面歌词和显示/隐藏主窗口。全局快捷键默认关闭；启用后窗口隐藏到托盘时仍响应，退出应用后释放绑定。点击按键框录入，Esc 取消，Backspace/Delete 清除；重复或系统占用的组合会显示提示，并保留原绑定。macOS 默认组合使用 Command + Option，Windows 使用 Ctrl + Alt。系统媒体键沿用原有行为。
 
 构建产物位于：
 
@@ -31,7 +37,6 @@
 | macOS   | `output/RHINE MUSIC DATABASE.app`                            |
 | Windows | `output/RhineMusicDatabase-<构建标识>-Windows-x64-Setup.exe` |
 | Linux   | `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage` |
-| Android | `output/RhineMusicDatabase-<构建标识>-Android-arm64.apk`     |
 
 **macOS 若提示应用已损坏，需要执行**
 
@@ -57,19 +62,27 @@ macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_
 桌面播放由独立后台服务管理音频、队列与账号；服务生命周期与界面进程绑定，
 界面正常退出或崩溃都会停止播放并结束服务。渲染、窗口与托盘始终由界面进程负责。
 
-图形后端在 Windows 与 Linux 上优先使用 Vulkan，不可用时回退 OpenGL；macOS 固定使用 Metal。
+图形后端在 Windows 与 Linux 上优先使用 Vulkan；Windows 不可用时回退 Direct3D 12，Linux 回退 OpenGL；macOS 固定使用 Metal。
 `RHINE_GRAPHICS=vulkan|opengl|auto` 可手动指定，`QSG_RHI_BACKEND` 的优先级更高。
+Linux 上「不可用」包含两种：没有 Vulkan 物理设备，和当前 X11 连接没有 DRI3 扩展。
+后者在没有 DRI3 的 Xorg 上会让 Mesa 在创建交换链时失败，而 Qt 拿不到交换链会直接 abort，
+所以启动时先问 X 服务器要 DRI3，缺了就自动走 OpenGL 并打一条说明；确认自己的驱动另有呈现路径
+可以设 `RHINE_X11_ALLOW_VULKAN=1` 跳过这条判断。启动日志里新增一行
+`Display: <平台插件> backend: <后端>`，排障时先看它。
+
+Linux 会话分 X11 与 Wayland 两条路，平台插件在启动时就固定了：
+`RHINE_QPA_PLATFORM=xcb` 强制走 X11（Xorg 或 XWayland），`RHINE_QPA_PLATFORM=wayland` 强制走 Wayland，
+不设则跟随 `QT_QPA_PLATFORM` 与系统默认。纯 Xorg 会话、以及 Wayland 下有兼容问题（比如输入法、
+窗口装饰相关的崩溃）时可以先用 `xcb` 对照。
 
 Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生效。列表只显示序号（0 基，与 `/sys/class/drm` 的 `cardN` 顺序一致），保存的也是序号——型号会随驱动更新和换卡变化，序号才是稳定的东西。序号在下次启动时不存在（换卡、拔掉 eGPU 或配置被改坏）就自动回退到默认行为：不注入任何厂商变量，完全等同于此前的版本，设置页会注明「序号 N 不存在」。
 实现上按驱动分流：Mesa 系（i915 / xe / amdgpu / nouveau）用 `DRI_PRIME=pci-0000_01_00_0` 把目标卡排到物理设备列表首位，NVIDIA 专有驱动用 `__NV_PRIME_RENDER_OFFLOAD=1` 加 `__VK_LAYER_NV_optimus=NVIDIA_only`（选非 NVIDIA 卡时为 `non_NVIDIA_only`），Qt 取枚举到的第一块卡即等于选中。`RHINE_GPU_INDEX=N` 只对本次启动生效，不改配置，便于对照；`RHINE_SOFTWARE_GPU=1` 时不做任何选择。两张同型号 NVIDIA 显卡之间无法区分（NVIDIA 图层只能表达「要 / 不要 NVIDIA」），此时会打一条警告。
-
-**面板内播放支持网易云、QQ 和酷狗音乐返回的可用音源。网易云官方客户端入口需要安装并注册网易云音乐；QQ 提供来源网页入口，酷狗提供官方网站入口。**
 
 ## 功能列表
 
 勾选表示已实现；未勾选表示当前未实现，不代表承诺开发。
 
-### 网易云音乐
+### 音乐来源插件
 
 - [x] 歌曲、专辑、歌单、歌手搜索与分页
 - [x] 歌手热门歌曲与发行专辑
@@ -78,39 +91,14 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 - [x] 创建、重命名、删除自己的歌单
 - [x] 歌曲加入或移出歌单
 - [x] 每日推荐、推荐歌单、排行榜、新专辑、分类歌单
-- [x] 面板内播放与网易云官方客户端入口
+- [x] 面板内播放与插件声明的官方客户端入口
 - [x] 同步歌词与逐句滚动
-- [ ] MV、评论社交、云盘、电台
-- [x] 音乐下载（音质回退、标签与歌词、整张专辑目录和 cue）
+- [x] 歌曲评论浏览：由支持评论 operation 的插件读取；塞壬唱片可匹配可用评论来源
+- [x] 关联 MV 自动静音播放、独立窗口、视频版本选择、全屏与透明度调节
+- [x] Windows 桌面壁纸模式、显示器选择、桌面进度控制与音乐频谱波浪
+- [ ] 评论互动、云盘、电台
+- [x] 音乐下载：队列、专辑 cue、NCM/QMC 解密（登录与搜索仍由音源插件提供）
 
-### QQ 音乐
-
-- [x] 关键字搜索
-- [x] 从歌曲浏览专辑与歌手作品
-- [x] 手机 QQ、微信扫码登录
-- [x] 喜欢歌曲、自建及收藏歌单、收藏专辑
-- [x] 自建非公开歌单读取
-- [x] 每日 30 首、猜你喜欢、推荐歌单、榜单、新专辑、分类歌单、新歌速递
-- [x] 面板内播放与来源网页入口
-- [x] 歌曲、专辑、歌单、歌手独立搜索与分页
-- [x] 红心与取消红心，收藏及取消收藏歌单、专辑
-- [x] 创建、改名、删除本人普通歌单，普通曲库歌曲加歌、移除
-- [x] 同步歌词与逐句滚动
-- [ ] MV、评论社交、电台
-- [x] 音乐下载（无损 / APE / 320 / 128 / M4A、登录或匿名、QQ 加密文件解密）
-
-### 酷狗音乐（标准版 / 概念版）
-
-- [x] 选择标准版或概念版 App 扫码登录，固定设备身份与两个版本独立的本机加密凭据保存
-- [x] 登录后的歌曲、专辑、歌单、歌手搜索
-- [x] 自建及收藏歌单、默认喜欢歌单读取，歌单、榜单及专辑曲目播放
-- [x] 推荐歌单、每日推荐、排行榜、新专辑与分类歌单
-- [x] 歌手单曲和发行专辑浏览
-- [x] 按文档注册设备取得 dfid，再调用 `/song/url`；高音质不可用时回退标准音质
-- [ ] 收藏专辑读取与账号内容编辑
-- [x] 同步歌词与逐句滚动
-- [ ] MV、评论社交、云盘、电台
-- [x] 音乐下载（使用当前账号的播放地址落盘，并写入能识别的标签）
 
 ### 本地音乐
 
@@ -121,7 +109,7 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 - [x] 缺少歌词或封面时复用跨平台录音匹配补充，不改写音频标签或音乐文件
 - [x] 按歌曲、歌手、专辑与文件夹分组浏览，支持本地检索
 - [x] 面板内播放、播放队列与同步歌词
-- [x] 按文件名、编码格式、采样率与码率近似匹配网易云音质标识
+- [x] 按文件名、编码格式、采样率与码率近似匹配插件提供的音质档位
 - [x] `.rhineignore` 或 `.foliaignore` 排除规则，支持 `*`、`?`、`**`、目录末尾 `/`、根路径前导 `/` 与 `!` 否定
 - [x] 重新扫描、取消扫描；移除导入位置只删除索引，不删除磁盘文件
 - [x] 离线时已导入的曲目、封面与本地歌词仍可播放
@@ -131,7 +119,7 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 - [x] 三维光盘盒、唱片与资料库动画
 - [x] 原生全屏与窗口模式切换
 - [x] 按歌手或专辑分组浏览已载入结果
-- [x] 网易云 / QQ / 酷狗直接选择与账号、请求、缓存隔离
+- [x] 多来源插件直接选择与账号、请求、缓存隔离
 - [x] 播放、暂停、切歌、进度与音量控制
 - [x] 播放栏歌词入口、当前歌曲歌词页面、点击歌词跳转、单曲时间校准与离线歌词缓存
 
@@ -140,31 +128,48 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 - [x] 亮色、暗色、跟随系统与减少动效
 - [x] 音质选择、试听提示与可选替代音源
 - [x] macOS 系统媒体按钮
-- [x] macOS Apple Silicon、Linux x86_64、Windows x64 与 Android arm64 构建和打包
-- [ ] MV 播放
+- [x] macOS Apple Silicon、Linux x86_64 与 Windows x64 构建和打包
+- [x] 歌曲关联 MV 自动播放（桌面端）
+
+### 关联 MV 窗口
+
+在「设置 → 终端偏好」开启「自动播放关联 MV」。
+独立窗口会读取平台提供的关联 MV；没有关联时默认匹配搜索首项，无结果或加载失败时显示提示，音乐继续播放。
+视频始终静音，跟随主播放器切歌、暂停、恢复和跳转，不改变音频音质或播放队列。
+
+窗口底部可选择视频版本和 20%–100% 的透明度，支持 F11 全屏、Esc 退出全屏。独立窗口可直接拖到副屏。
+优先播放为歌曲记住的手动版本，其次播放歌曲明确关联的 MV；没有明确关联时自动选择搜索首项。版本列表提供按歌名筛选的 MV 搜索结果（包括现场、翻唱等），标明来源与歌手，手动选择后按歌曲记住。
+播放器底栏歌词按钮旁的「MV」可直接调出独立播放窗口。窗口图钉用于置顶，「锁定」会使视频和其他控件穿透鼠标点击，仅原位置的「解锁」按钮可操作；再次点击即可恢复。
+全屏时鼠标静止约 2.5 秒后自动隐藏上下控制栏，移动鼠标即可恢复；展开菜单或拖动滑块时保持显示。
+MV 与音频存在片头或剪辑时间差时，可用「画面偏移」以 0.5 秒为单位校准；正值让画面提前，
+偏移按 MV 保存，透明度也会记住；拔下显示器后窗口自动回到可用屏幕。
+关闭 MV 窗口会同时关闭自动播放，可在设置中重新开启。
+
+搜索结果不保证是同一首歌，选择前请核对标题与歌手。视频可用性仍取决于平台收录、地区与账号权限。
+Windows 下可在 MV 窗口点击「桌面壁纸」，再选择「壁纸显示器」。视频嵌入桌面图标下方，跟随音乐暂停、跳转与切歌，模式和显示器选择会记住；显示器断开时回到主屏。
+独立 MV 窗口支持 Linux、Windows 和 macOS；桌面壁纸目前仅在 Windows 提供，由 `Qt/src/PlatformFeatures.h` 统一声明能力，其他平台保留窗口播放。
+壁纸底部常驻金色发光进度条、播放／暂停和「退出壁纸」，控件直接叠加在 MV 画面内，并带弱阴影。
+壁纸模式下关闭 MV 设置窗口不会停止桌面播放，可从桌面控制条的「设置」重新打开。
+进度条上的波浪来自主播放器实际解码音频的频谱，暂停后收平；拖动进度会调整歌曲与 MV 的同步位置。「退出壁纸」只关闭 MV 自动播放，音乐继续。
+点击「返回窗口」可恢复独立窗口播放；没有可用 MV 或视频加载失败时保留原桌面背景。壁纸模式不会修改系统保存的壁纸文件，退出应用后恢复原背景。
 
 **音质和完整播放取决于账号权限与音源可用性；返回试听时会明确提示。替代音源默认关闭，开启时使用锁定上游的匹配实现，音质由匹配来源决定，失败时可使用官方入口。**
 
-下载沿用现在的终端界面，不另做一套播放器皮肤。歌曲详情左侧有「下载这首」，专辑和歌单标题旁有「下载整张 / 下载已加载」，列表行首 ○/● 可勾选后「下载选中」（平铺落盘，不走专辑封装），底栏在有任务时显示「下载 N」，设置里可以改音质、歌词、QQ/网易各自独立的下载身份、并发、下载目录与解密输出目录，也可以打开下载队列、按文件或按文件夹解密 QQ 音乐的 `.mflac` / `.mgg` / `.qmc0` 以及网易云 `.ncm` 缓存；已完成任务可「打开」所在文件夹。QQ 与网易云歌曲 / 专辑 / 歌单链接可直接粘贴到搜索框导入。
-
-文件写到设置里的下载目录（默认是系统音乐目录下的 `Rhine`）。单曲是「歌名 - 歌手.扩展名」。整张专辑是「歌手 - 专辑 (年)/序号 歌名」，多碟再套 `CDnn/`，封面和 `album.cue` 只在这一碟真正下齐、而且容器是 FLAC 或 MP3 时才写。网易云直链如果被 CDN 节点拒绝，会先换节点，再不行才改用匿名地址。APE 和 M4A 可以下载，但没有标签写入器，只在歌词选择「另存」时旁边放一份 `.lrc`。
-
-下载只使用你自己的登录态去取你有权限的文件，不会绕过会员限制。拿不到时队列里会写明原因。
+本 fork 在上游面板之外保留 music-download 的下载与解密：歌曲、已加载专辑和歌单可以进入下载队列，专辑在曲目齐全时写出 cue，并支持 NCM/QMC 本地解密。直链仍由已安装的网易云、QQ 音乐、酷狗插件解析，仓库不内置这些插件。
 
 ## 图形后端与功能
 
-| Platform | Vulkan | Direct3D 12 | OpenGL | Metal |
-| -------- | ------ | ----------- | ------ | ----- |
-| Windows  | ✅     | 已停用      | ✅     | -     |
-| macOS    | -      | -           | -      | ✅    |
-| iOS / iPadOS | - | - | - | ✅ |
-| Android  | 可选   | -           | OpenGL ES | -    |
-| Linux    | ✅     | -           | ✅     | -     |
+| Platform     | Vulkan | Direct3D 12 | OpenGL | Metal |
+| ------------ | ------ | ----------- | ------ | ----- |
+| Windows      | ✅     | ✅          | ✅     | -     |
+| macOS        | -      | -           | -      | ✅    |
+| iOS / iPadOS | -      | -           | -      | ✅    |
+| Linux        | ✅     | -           | ✅     | -     |
 
 | API         | FXAA   | SSAA   | MSAA   | TAA     | Upscaling        | Frame Generation |
 | ----------- | ------ | ------ | ------ | ------- | ---------------- | ---------------- |
 | Vulkan      | ✅     | 2x MAX | 8x MAX | ✅      | EASU + RCAS      | ✅               |
-| Direct3D 12 | 已停用 | -      | -      | -       | -                | -                |
+| Direct3D 12 | ✅     | 2x MAX | 8x MAX | ✅      | EASU + RCAS / FSR3 | ✅               |
 | OpenGL      | ✅     | 2x MAX | 8x MAX | ✅      | EASU + RCAS      | -                |
 | Metal       | -      | -      | -      | MetalFX | MetalFX Temporal | MetalFX          |
 
@@ -210,6 +215,9 @@ npm run share
 
 本机已有 `vendor/node-arm64/node` 与许可证时可作为默认运行时。`QT_ROOT` 未设置时使用 `~/Qt/6.12.0/macos`。
 
+`npm run build` 默认生成 core-only 产物，不预装第三方平台插件；需要完整开发包时使用
+`npm run build -- --plugins=full`，之后在插件管理里从市场安装。
+
 ### Windows x64
 
 安装 Visual Studio 2022 的“使用 C++ 的桌面开发”组件、Windows SDK 和 Qt MSVC 2022 64 位 kit。在 **Developer PowerShell for VS 2022** 中进入项目目录：
@@ -228,6 +236,22 @@ Windows 的 `npm run share` 使用 [Inno Setup 6.3+ 或 7](https://jrsoftware.or
 只生成 `output/RhineMusicDatabase-<构建标识>-Windows-x64-Setup.exe` 安装程序。
 安装器默认安装到 `%LOCALAPPDATA%\Programs\RhineMusicDatabase`，无需管理员权限，提供开始菜单快捷方式、可选桌面快捷方式和卸载入口。
 应用在安装目录的 `data` 中保存账号、设置和缓存，请选择当前用户可写的目录。安装包排除构建机上的运行数据，覆盖安装和卸载保留用户的 `data`；彻底清理时可手动删除。
+
+Windows 默认编入完整 D3D12 / FidelityFX DX12，`RHINE_GRAPHICS=d3d12` 可指定该后端。首次构建仍需从锁定源码编译 DXC；CI 会在应用构建前独立构建并保存 `generated/dxc`，后续按源码提交、构建配方及工具链签名复用，即使后续应用构建失败也不会丢掉已完成的 DXC 缓存。
+
+本机也可先单独准备工具链（无需 Qt），再运行通常的构建：
+
+```powershell
+cmake -S cmake/dxc-bootstrap -B output/dxc-bootstrap -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build output/dxc-bootstrap --target rhine_dxc
+npm run build
+```
+
+构建用 DXC 使用独立的 `RHINE_DXC_PYTHON_EXECUTABLE`，优先选择 CI `setup-python` 的解释器，其次从 PATH 查找，避免 Qt/glslang 选择其他 Python 后改变工具链签名。需要时可用同名 CMake 参数显式指定。
+
+构建用 DXC 默认固定为 Release，与应用 Debug/Release 配置分开；Release 不生成无用的调试信息和 PDB，保持优化等级。嵌套构建默认最多使用 8 个并行任务，可用 `-DRHINE_DXC_BUILD_JOBS=N` 调整；DX12 每个着色器编译进程默认 2 个线程，可用 `-DRHINE_FFX_DX12_SHADER_THREADS=N` 调整，避免多个编译进程各自占满所有核心。FSR3、插帧及所有着色器置换仍保留。
+
+高级构建可用 `-DRHINE_ENABLE_D3D12_BACKEND=OFF` 显式排除 D3D12。缓存只复用本项目从源码构建的工具，不使用 SDK 中附带的预编译编译器；源码、配方或编译器等签名变化时会重新构建。Linux/macOS 不会构建 DXC。
 
 ### Linux x86_64（AppImage）
 
@@ -256,7 +280,9 @@ RHINE_RESOURCES=$PWD/output/resources RHINE_AA_MODE=off ./output/qt-build/RhineM
 
 随包的 Node 必须是官方独立分发包：构建脚本会检查 `ldd` 结果，只依赖 glibc 运行库的构建才会被打进 AppImage，发行版自己的 `/usr/bin/node` 动态链接了系统 ICU 等库，会被拒绝。
 
-Linux 包随附自编的 FFmpeg：发行版 `libavcodec` 动态依赖 x265/aom/SvtAv1Enc 等编码器库（合计约 55 MB），而这里只用 Qt 的 FFmpeg 后端解码音频。`scripts/prepare-linux-ffmpeg.cjs` 构建一份只保留音频能力的版本：编码器、复用器、avdevice、avfilter 全部关闭，解码器按 `vendor/ffmpeg/decoders-linux.json` 的音频白名单启用（视频解码器如 HEVC、H.264、VP9、AV1 不编译），parser 与 bitstream filter 也只留音频相关的部分，解复用器保持全开（源码优先取 `third_party/ffmpeg` 子模块，锁定标签 `n9.0.1` 且保持上游原样；子模块缺失或提交与 `vendor/ffmpeg/source.json` 的 `pinned-commit` 不一致时，回退到锁定校验和的发布包）（LGPL-2.1-or-later，不启用任何 GPL 或非自由组件），构建时自动替换进包。发现漏掉的音频格式时，用 `RHINE_FFMPEG_EXTRA_DECODERS=aac_latm,xxx` 临时追加解码器，确认后再补进白名单文件。设置 `RHINE_FFMPEG=system` 可回退发行版库；Qt 后端要求的 SONAME 与自编版本不一致时也会自动回退并告警。许可与来源见 `NOTICE` 及包内 `third-party/FFmpeg/`。构建用 `--enable-small`（`-O3` 换 `-Os`）与 `--enable-lto` 压缩体积；`-flto` 同时显式写进 `--extra-ldflags`，因为 FFmpeg 自己那套 `check_ldflags -flto $cpuflags` 探测在 GCC 16 上会因 `-march=generic` 失败并把 `-flto` 静默丢掉。脚本在 configure 后复核 `CFLAGS` 与 `LDFLAGS` 都带 `-flto`，缺任一即失败；工具链不支持 LTO 时可用 `RHINE_FFMPEG_LTO=0` 退回普通构建。
+Linux 包随附自编的 FFmpeg：发行版 `libavcodec` 动态依赖 x265/aom/SvtAv1Enc 等编码器库（合计约 55 MB），而这里只用 Qt 的 FFmpeg 后端解码音频与关联 MV。`scripts/prepare-linux-ffmpeg.cjs` 构建一份保留音频及 H.264 / HEVC 视频解码能力的版本：编码器、复用器、avdevice、avfilter 全部关闭，解码器按 `vendor/ffmpeg/decoders-linux.json` 的音频白名单与 `videoDecoders` 启用（H.264、HEVC；VP9、AV1 不编译），parser 与 bitstream filter 保留音频及这两种 MV 编码需要的部分，解复用器保持全开（源码优先取 `third_party/ffmpeg` 子模块，锁定标签 `n9.0.1` 且保持上游原样；子模块缺失或提交与 `vendor/ffmpeg/source.json` 的 `pinned-commit` 不一致时，回退到锁定校验和的发布包）（LGPL-2.1-or-later，不启用任何 GPL 或非自由组件），构建时自动替换进包。发现漏掉的音频格式时，用 `RHINE_FFMPEG_EXTRA_DECODERS=aac_latm,xxx` 临时追加解码器，确认后再补进白名单文件。设置 `RHINE_FFMPEG=system` 可回退发行版库；Qt 后端要求的 SONAME 与自编版本不一致时也会自动回退并告警。许可与来源见 `NOTICE` 及包内 `third-party/FFmpeg/`。构建用 `--enable-small`（`-O3` 换 `-Os`）与 `--enable-lto` 压缩体积；`-flto` 同时显式写进 `--extra-ldflags`，因为 FFmpeg 自己那套 `check_ldflags -flto $cpuflags` 探测在 GCC 16 上会因 `-march=generic` 失败并把 `-flto` 静默丢掉。脚本在 configure 后复核 `CFLAGS` 与 `LDFLAGS` 都带 `-flto`，缺任一即失败；工具链不支持 LTO 时可用 `RHINE_FFMPEG_LTO=0` 退回普通构建。
+
+Linux CI 从 GitHub 浅检出已锁定提交的 `third_party/ffmpeg`，直接使用经过版本与工作区校验的源码，避免依赖 runner 无法稳定连接的 `ffmpeg.org`。本机构建也优先使用该子模块；未检出时仍可使用锁定 SHA256 的官方发布包。
 
 打包前会删掉 AppDir 里的开发期文件（`usr/include`、`usr/lib/cmake`、`usr/lib/pkgconfig`、man/doc 与 `*.a`、`*.la`、`*.prl`），这些是发行版 Qt 的安装规则带进来的，运行时用不到。
 
@@ -269,7 +295,7 @@ AppImage 默认使用 DwarFS 镜像：跨文件去重后体积明显小于 squas
 默认构建类型为 `Release`，Linux 构建为主程序开 LTO（`INTERPROCEDURAL_OPTIMIZATION_RELEASE`，GCC 下即 `-flto=auto`）。工具链缺 LTO 插件时 CMake 只会告警并降级，产物约大 1.5 MB；设 `RHINE_REQUIRE_LTO=1` 可把这种降级变成配置期错误（CI 的 Linux 任务即如此），核对方法见构建日志里的 `IPO/LTO enabled for Release` 一行。设置 `RHINE_BUILD_TYPE=Debug` 可构建调试版本；`PYTHON` 可覆盖 Python 命令。Qt 6.12+ 安装包含官方 QML Live Preview 工具时，可使用 `npm run preview` 进行热预览。
 
 设置 `RHINE_VERSION=vX.Y.Z` 时构建正式版，分发包的构建标识为 `vX.Y.Z`。
-未指定版本时为开发版：设置中显示最后一次提交标题、12 位短 SHA 和“开发版”，桌面、iOS 与 Android 分发包均以短 SHA 作为构建标识。
+未指定版本时为开发版：设置中显示最后一次提交标题、12 位短 SHA 和“开发版”，三平台分发包均以短 SHA 作为构建标识。
 检查更新仅获取发布信息；点击“前往更新”会打开 [GitHub releases 页面](https://github.com/MikeQu223/Rhine-Music-Database/releases)，由浏览器下载，不在应用内下载文件。
 
 `npm test` 使用本地响应验证音乐与播放状态、账号隔离、输入法焦点与提交、窗口迁移、锁定上游、打包通信和部署资源。默认测试不包含视觉快照、固定动画采样或桌面场景组合。离线测试不替代真实账号、在线音源、显示缩放、系统输入法与系统集成的实机检查。
@@ -282,23 +308,22 @@ Qt RHI 使用私有头文件，升级 Qt 后需重新编译并验证。
 执行 `npm run build:ios`，生成 `output/RhineMusicDatabase-ios-unsigned.ipa`；该文件需自行签名后安装。
 `RHINE_IOS_QT` 可以指定其他同版本 kit 路径。构建自动校验 NodeMobile 下载哈希，并检查包内架构、资源和动态依赖。
 
-## Android 构建
+## Android 构建（arm64-v8a）
 
-需要 JDK 17、Android SDK Platform 36、Build-Tools 36.0.0、NDK 27.2.12479018，以及 Qt 6.12.0 的 `android_arm64_v8a` kit 和同版本的 Linux desktop kit（提供 `androiddeployqt` 与 `qsb`）。设置 `ANDROID_SDK_ROOT` 后执行：
+需要 Android SDK（`platforms/android-36` 与 build-tools）、NDK r27 以上、JDK 17–25，
+以及 Qt 6.12.0 的 `android_arm64_v8a` kit——Qt 没有公开这个版本的 Android 预编译包，
+可以用仓库内 `third_party/qt` 的固定提交自行构建（`npm run build:qt:android`）。
+执行 `npm run build:android`，生成 `output/RhineMusicDatabase-<构建标识>-android-arm64-v8a.apk`；
+APK 用工作区内的调试密钥签名，可直接侧载。最低系统版本是 Android 9（API 28）：
+Qt 6.12 的 Android 音频后端只用 AAudio，相关接口从 API 28 才开始提供。
 
-```sh
-export RHINE_ANDROID_QT="$HOME/Qt/6.12.0/android_arm64_v8a"
-npm ci
-npm run build:android
-```
-
-产物是已签名的 release APK：`output/RhineMusicDatabase-<构建标识>-Android-arm64.apk`。默认使用仓库里的侧载密钥 `Qt/android/rhine-release.keystore`（别名 `rhine`，口令 `rhine-sideload`），因此 GitHub Actions 不需要额外密钥就能直接安装。这把密钥是公开的，只适合分发安装包，不能当作应用商店的上传密钥。要换自己的密钥，设置 `RHINE_ANDROID_KEYSTORE`、`RHINE_ANDROID_KEY_ALIAS`、`RHINE_ANDROID_KEYSTORE_PASSWORD` 和 `RHINE_ANDROID_KEY_PASSWORD`。
-
-发布 workflow 会把这个 APK 和桌面、iOS 包一起上传。应用内「前往更新」会按 `Android-arm64.apk` 识别当前平台的发布文件。面板内播放走嵌入的 Node 18 运行时和 OpenGL ES；官方客户端入口在 Android 上不可用。首次启动会把资源从 APK 解到应用私有目录。
+`RHINE_ANDROID_QT`、`JAVA_HOME`、`ANDROID_SDK_ROOT`、`ANDROID_NDK_ROOT` 可以覆盖默认路径。
+画面固定横屏（`sensorLandscape`），随包的 Node 运行时以 `libnode.so` 形式编进进程。
+签名默认用工作区内的调试密钥，当工作区根目录存在 `Rhine-Music-Database.key` 和 `Rhine-Music-Database.ket.password.key` 时会使用自定义签名。
 
 ## 本机数据与隐私
 
-搜索、歌曲资料、扫码与个人音乐库请求发送至所选音乐平台，封面从网易云、QQ 或酷狗音乐的图片域名加载。原始认证记录仅由 C++ 和 Node 桥处理；macOS 保存在钥匙串，Windows 通过 DPAPI 加密，Linux 保存在 `~/.local/share/RhineMusicDatabase/rhine.music.database/account.credential`（权限 `0600`），Android 保存在应用私有目录的 `account.credential`。本项目没有自建的数据收集服务器、分析 SDK 或自动上传诊断功能。
+搜索、歌曲资料、扫码与个人音乐库请求发送至已安装音乐来源插件声明的 API 与图片域名。原始认证记录仅由 C++ 和 Node 桥处理；macOS 保存在钥匙串，Windows 通过 DPAPI 加密，Linux 保存在 `~/.local/share/RhineMusicDatabase/rhine.music.database/account.credential`（权限 `0600`）。本项目没有自建的数据收集服务器、分析 SDK 或自动上传诊断功能。
 
 登录为可选功能。应用不读取浏览器或官方客户端的登录信息。
 
@@ -318,18 +343,26 @@ GPU 耗时/占用未采集，同步和提交的 CPU 时间不代表 GPU 执行�
 退出程序时也会保存进行中的录制。导出失败可重试。文件只包含性能数值和系统/图形后端信息，
 不包含账号、Cookie、搜索词、曲目、请求内容或截图。关闭面板且未录制时停止性能采样。
 
+Windows 与 macOS 桌面版默认不采集原生崩溃现场；在设置中打开“调试模式”后才会启用 Crashpad，
+关闭该开关会立即停止采样并清空已保存的崩溃日志与转储。
+报告保存在同一 `RHINE Diagnostics` 目录，`native-时间-标识.log` 可直接阅读，包含异常信息、
+各线程调用栈、匹配的应用源码行及最后的渲染阶段；同名前缀的 `.dmp` 保留原始现场。
+运行时只在本地处理，不上传报告。日志与转储保留最近二十组。
+日志采用 `UTC时间 LEVEL event=事件 key=value` 格式，保留 Qt fatal 原文、最近渲染警告、资源创建参数、
+设备与 AA/FSR 配置；调用栈包含 `trust`、`missing_symbols`、源码行和模块 debug ID。
+GUI 心跳或正在执行的渲染调用连续五秒未推进时，记录 `hang.gui` 或 `hang.render`；
+每次持续阻塞最多采样三次，间隔至少两秒。独立报告进程在应用退出后继续导出。
+转储可能包含内存中的业务信息，分享前请确认内容。
+
 ## 参考项目
 
-- **[NeteaseCloudMusicApiEnhanced](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced)**: 网易云接入
-- **[MakcRe/KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)**: 酷狗音乐标准版及概念版接入
-- **[yakult-green-tea/qq-music-api](https://github.com/yakult-green-tea/qq-music-api)**: QQ 音乐接入
 - **[LBEILC / RhineLabUI](https://github.com/LBEILC/RhineLabUI)**：特别感谢原界面、模型与场景作者，版权声明随项目保留。
 - **[LyricsX](https://github.com/MxIris-LyricsX-Project/LyricsX)**：歌词获取、解析与显示分层参考。
 - **[LyricsKit](https://github.com/MxIris-LyricsX-Project/LyricsKit)**：LRC、YRC、KRC 格式解析移植，
   `MusicBridge/lyrics-format.cjs` 单独采用 MPL-2.0，固定版本与许可随包保留。
 - **[Lyrimuse](https://github.com/Yudaotor/lyrimuse)**：统一时间轴、歌词同步与录音版本匹配思路参考。
-- **[music-download](https://github.com/xiaoxu66609/music-download)**：下载队列、音质回退、专辑封装和 QQ 加密文件解密。解密算法来自
-  [UnlockMusicProject_Archive](https://github.com/showhwa/UnlockMusicProject_Archive)。
+- **[music-download](https://github.com/xiaoxu66609/music-download)**：下载队列、标签与 NCM/QMC 解密的来源，随 `MusicBridge/vendor/music-download` 带入。
+- **[MikeQu223 / Rhine-Music-Database](https://github.com/MikeQu223/Rhine-Music-Database)**：本仓库跟踪的播放器上游。
 
 ## AI 声明
 

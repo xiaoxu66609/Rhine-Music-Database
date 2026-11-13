@@ -1,10 +1,17 @@
 #pragma once
+#include "ResponsiveHudTransition.h"
+#include "DesktopLyricsLayout.h"
+#include "GlobalShortcuts.h"
 #include "Glyphs.h"
+#include "HudScroll.h"
+#include "ResponsiveHudLayout.h"
 #include "MusicLibrary.h"
+#include "SettingsSchema.h"
 #include "UiMotion.h"
 #include <QCache>
 #include <QPointF>
 #include <QRectF>
+#include <QtGlobal>
 #include <map>
 #include <optional>
 
@@ -19,6 +26,8 @@ struct HudSceneActions {
     std::function<void()> openViewer;
     std::function<void(bool)> coverFront;
 };
+
+class DiscoverArtwork;
 
 class NativeHud : public QObject {
     Q_OBJECT
@@ -43,7 +52,13 @@ class NativeHud : public QObject {
               QObject *parent = nullptr);
     void draw(QJsonObject frame, double width, double time);
     QJsonObject state() const;
+    bool compactLayout() const {
+        return m_responsive.compact();
+    }
     void action(QString action);
+    GlobalShortcuts *shortcuts = nullptr;
+    void shortcutsPanel(double x, double y, double width);
+    void applyShortcutAction(const QString &value);
     void key(QString key, bool command);
     void wheel(double x, double y, double delta, std::optional<int> steps = std::nullopt,
                std::optional<double> distance = std::nullopt);
@@ -51,9 +66,20 @@ class NativeHud : public QObject {
     void openModal(QString kind);
     void closeModal();
     void setQuery(QString value);
+    // ！？ 325 ？！
+    void openHiddenVideo();
     void pageResults(int direction);
+    // 重新测量设置页内容高度；会话恢复和展开下拉前必须调用。
+    void refreshSettingsLayout();
+    // 通用文本设置的编辑入口；QML 浮层通过这三个方法提交/取消。
+    void beginSettingEdit(const QString &id);
+    void setSettingEditText(const QString &text);
+    void commitSettingEdit();
+    void cancelSettingEdit();
     bool animating(double time) const;
     bool supportsTrackList() const;
+    // 资料库中的 ENTER 是否直接播放当前曲目（由“切歌不打开详情”控制）。
+    bool enterPlaysSelection() const;
     QVector<Row> rows(int lane);
     QRectF modalBounds(double width) const;
     QRectF detailBounds(double width) const;
@@ -63,12 +89,14 @@ class NativeHud : public QObject {
     QJsonObject frame;
     QString tab = "overview";
     QString modal;
+    QString pluginManagerMessage;
+    QString pluginDetailId;
     QString query;
     QString formKind;
     QString formPID;
     QString confirmTitle;
-    QString confirmBody;
-    QString confirmAccept;
+    QString confirmMessage;
+    QString confirmLabel;
     QString detailSort = "none";
     QString groupBy = "none";
     QString activeGroup;
@@ -76,9 +104,23 @@ class NativeHud : public QObject {
     bool categoryPicker = false;
     int categoryPage = 0;
     static constexpr int CategoryPageSize = 40;
+    double discoverScroll = 0;
+    double discoverScrollMaximum = 0;
     QString themeMode;
     int listOffset = 0;
     int musicCollection = 1;
+    // 检索与个人库共用同一结果视口和行高。
+    static constexpr double ResultListTop = 328;
+    static constexpr double ResultListBottom = 758;
+    static constexpr double ResultRowHeight = 72;
+    double searchScroll = 0;
+    int searchRowCount = 0;
+    double savedScroll = 0;
+    int savedRowCount = 0;
+    // 通用文本设置的 QML 编辑浮层状态；清空 id 即隐藏。
+    QString editingSettingId;
+    QString editingSettingText;
+    QRectF editingSettingRect;
     // 六行同专辑
     static constexpr int AlbumTrackRowCount = 6;
     static constexpr double AlbumTrackTop = 630;
@@ -91,28 +133,58 @@ class NativeHud : public QObject {
     static constexpr double SettingsViewportBottom = 836;
     double settingsContentBottom = 1600;
     double settingsScroll = 0;
-    // 设置页下拉块：非空时该偏好行展开成选项列表（目前只有抗锯齿使用）。
+    // 设置页下拉块：非空时该偏好行展开成选项列表。
     QString expandedPreference;
+    // 清除缓存后的结果提示；重新打开设置页时清空。
+    QString cacheMessage;
+    QString storageUsage;
+    void refreshStorageUsage();
+    // 从主设置页进入桌面歌词页时保留原滚动位置。
+    double settingsReturnScroll = 0;
+    // 桌面歌词样式页使用独立滚动区。
+    static constexpr double DesktopLyricsViewportTop = 200;
+    static constexpr double DesktopLyricsViewportBottom = 820;
+    double desktopLyricsContentBottom = 1600;
+    double desktopLyricsScroll = 0;
+    DesktopLyrics::Appearance desktopLyricsAppearance;
+    bool desktopLyricsAppearanceLoaded = false;
     double settingsScrollMaximum() const {
-        return settingsContentBottom - SettingsViewportBottom;
+        return HudScroll::maximum(settingsContentBottom - SettingsViewportTop,
+                                  SettingsViewportBottom - SettingsViewportTop);
+    }
+    double desktopLyricsScrollMaximum() const {
+        return HudScroll::maximum(desktopLyricsContentBottom - DesktopLyricsViewportTop,
+                                  DesktopLyricsViewportBottom - DesktopLyricsViewportTop);
     }
     bool dark = false;
     bool reduced = false;
     bool startupAnimation = false;
     bool discRotation = false;
+    bool skipDetailOnSwitch = false;
     bool vsync = true;
     int archiveMaskStrength = 50;
     bool closing = false;
     bool lyricsMode = false;
+    bool commentsMode = false;
+    QString commentsReturnTab = "overview";
+    QString commentsTrackKey;
+    double commentsScroll = 0;
+    double commentsContentBottom = 0;
     bool trackListMode = false;
     double width = 1920;
     double lastTime = 0;
+    /// 进入 detail 的真实墙钟时刻（QDateTime 毫秒）。HUD 淡入不能只依赖
+    /// frame["detail"]：那个值来自 m_animationTime 伪时钟，引擎休眠时会永久停住。
+    qint64 m_detailEnterWallMs = -1;
     UiMotion::SurfaceMotion motion;
+    std::optional<QRectF> playerBounds;
     std::optional<QRectF> playerSeekRect;
     std::optional<QRectF> playerVolumeRect;
 
   signals:
     void localImportRequested(bool folder);
+    void pluginImportRequested();
+    void mvRequested();
     void downloadDirectoryRequested();
     void downloadDecryptRequested();
     void downloadDecryptFolderRequested();
@@ -152,6 +224,11 @@ class NativeHud : public QObject {
     MusicLibrary *m_music;
     HudSceneActions m_scene;
     quint64 m_searchGeneration = 0;
+    // ！？ 325 ？！
+    QString m_secretKeys;
+    // 首屏不足一屏时自动补页，记录上次自动补页后的条数，避免空页循环请求。
+    int m_searchAutoFillSize = -1;
+    int m_savedAutoFillSize = -1;
     std::optional<Page> m_page;
     QString m_trackListScope;
     int m_trackListTarget = -1;
@@ -160,14 +237,40 @@ class NativeHud : public QObject {
     QCache<QString, QString> m_fitCache{512};
     std::map<QString, UiMotion::RollingLabel> m_rolling;
     QString m_sortNotice;
+    // QObject 子对象拥有生命周期，封面回调不跨越 HUD 销毁。
+    DiscoverArtwork *m_discoverArtwork = nullptr;
+    DiscoverArtwork *m_savedArtwork = nullptr;
+    QString m_discoverScrollScope;
+    QString m_songQueueFeedbackKey;
+    QHash<QString, QString> m_songQueueFeedback;
+    // 每个按钮独立计时，重复点击重启计时器；HUD 销毁时自动取消回调。
+    QHash<QString, QTimer *> m_songQueueFeedbackTimers;
+    struct PlaylistContext {
+        QString id;
+        bool contained = false;
+    };
+    // 只有从可编辑歌单打开的歌曲才返回上下文；搜索结果不参与歌单增删。
+    std::optional<PlaylistContext> openedPlaylistContext() const;
+    void showPlaylistFeedback(const QString &action, const QString &text, int holdMs);
+    QString m_playlistFeedbackKey;
+    QHash<QString, QString> m_playlistFeedback;
+    QHash<QString, QTimer *> m_playlistFeedbackTimers;
     QString m_sortContainerKey;
     QJsonArray m_sortTracks;
     QString m_sortField;
     QVector<int> m_trackOrder;
     QString m_rowsKey;
+    QJsonArray m_rowsSource;
     QVector<Row> m_rows;
     QString m_resultSignature;
     double m_resultStart = 0;
+    ResponsiveHudLayout m_responsive;
+    ResponsiveHudTransition m_mobileTransition;
+    QJsonObject sourceState() const;
+    void drawMobile(double time, const QString &scope);
+    ResponsiveHudContent::Model *m_contentSink = nullptr;
+    QVector<ResponsiveHudContent::Item> auxiliaryContent();
+    void modalBody(double x, double y, double usable);
     bool m_modalControls = false;
     QJsonObject m_lyricsDocument;
     double m_lyricsWidth = 0;
@@ -206,6 +309,8 @@ class NativeHud : public QObject {
     void hit(double x, double y, double width, double height, QString action, QString label = {});
     void button(QString label, double x, double y, double width, double height, QString action, double size,
                 QString weight = "regular");
+    void pluginButton(const QString &label, double x, double y, double width, double height,
+                      const QString &action, double size, bool primary = false, QJsonArray color = {});
     void control(QString label, double x, double y, double width, QString action);
     void rule(double x, double y, double width, double opacity = 0.4);
     void image(QString key, double x, double y, double width, double height);
@@ -226,6 +331,7 @@ class NativeHud : public QObject {
     void actionButton(QString label, double x, double y, double width, QString action, bool primary = false);
     void detail(double width, double opacity);
     void lyricsPanel(double x, double width);
+    void commentsPanel(double x, double width);
     QString body() const;
     void container(double width, double opacity);
     void viewer(double width);
@@ -233,15 +339,48 @@ class NativeHud : public QObject {
     void modalDraw(double width);
     void loginPanel(double x, double y, double width);
     void libraryPanel(double x, double y, double width);
+    void savedPanel(double x, double y, double width);
+    // 个人库沿用检索页的工具条、结果列表和页脚结构，外框几何仍由弹窗宿主决定。
+    void libraryToolbar(double x, double y, double width);
+    void libraryResultList(double x, double y, double width);
+    void libraryFooter(double x, double y, double width);
+    void libraryOutlineButton(const QRectF &rect, const QString &label, const QString &action, double size,
+                              bool plus = false);
+    double libraryToolbarActionWidth() const;
+    double savedScrollMaximum() const;
+    void ensureSavedFilled();
+    // 检索面板按工具条、结果列表和页脚拆分，外框几何仍由弹窗宿主决定。
+    void searchPanel(double x, double y, double width);
+    void searchToolbar(double x, double y, double width);
+    void searchResultList(double x, double y, double width);
+    void resultListRow(const Row &entry, double x, double y, double width, const QString &query, int lane);
+    void searchTitle(const QString &title, const QString &query, double x, double y, double size,
+                     double width);
+    void searchFooter(double x, double y, double width);
+    double searchScrollMaximum() const;
+    void resetResultViews();
+    void ensureSearchFilled();
     void discoverPanel(double x, double y, double width);
     void localPanel(double x, double y, double width);
     void playerBar(double x, double y, double width);
     void playerPanel(double x, double y, double width);
     void downloadPanel(double x, double y, double width);
     void downloadAction(const QString &action);
+    QJsonArray providerCardsState() const;
+    QJsonArray providerPlaylistEditors() const;
     void platformChoices(double x, double y, double width, bool expanded = false);
     void platformPanel(double x, double y, double width);
-    void settings(double x, double y, double width);
+    void pluginsPanel(double x, double y, double width);
+    void pluginDetailPanel(double x, double y, double width);
+    void settingsPanel(double x, double y, double width);
+    void paintSettingsCustomSection(const QString &renderer, const QRectF &body, double scroll);
+    SettingsSchema::SettingsContext settingsContext() const;
+    void applySettingValue(const QString &id, const QString &value);
+    void restoreSettingsDefaults();
+    void refreshDesktopLyricsLayout();
+    void refreshDesktopLyricsAppearance();
+    void desktopLyricsPanel(double x, double y, double width);
+    void applyDesktopLyricsAction(const QString &value);
     void qualityPanel(double x, double y, double width);
     void qualityChoice(const QString &id, int number, double x, double y, double width, bool featured);
     void logo(double x, double y, double width);

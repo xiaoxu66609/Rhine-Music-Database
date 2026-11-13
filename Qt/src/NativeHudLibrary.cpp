@@ -1,273 +1,306 @@
 #include "NativeHud.h"
-#include "MusicData.h"
-#include "MusicDiscover.h"
-#include <QUrl>
+#include "HudScroll.h"
+#include "ProviderRegistry.h"
 #include <algorithm>
+#include <cmath>
+
+namespace {
+constexpr double LibraryInset = 53;
+constexpr double LibraryBarTop = 172;
+constexpr double LibraryBarHeight = 66;
+constexpr double LibraryTabTop = 252;
+constexpr double LibraryTabHeight = 36;
+constexpr double LibraryTableY = 302;
+constexpr double LibraryFooterY = 786;
+constexpr double LibraryCreateWidth = 150;
+constexpr double LibraryRefreshWidth = 110;
+constexpr double LibraryActionGap = 10;
+constexpr double LibraryTitleX = 107;
+constexpr double LibraryActionWidth = 136;
+
+QJsonArray accent() {
+    return {0.835, 0.639, 0.282, 1};
+}
+
+QJsonArray mutedInk(const QJsonArray &ink) {
+    auto value = ink;
+    value[3] = 0.55;
+    return value;
+}
+
+QJsonArray faintInk(const QJsonArray &ink, double alpha) {
+    auto value = ink;
+    value[3] = alpha;
+    return value;
+}
+
+QJsonArray libraryBarFill(bool dark) {
+    return dark ? QJsonArray{0.169, 0.200, 0.173, 1} : QJsonArray{0.898, 0.906, 0.855, 1};
+}
+
+QJsonArray libraryPanelFill(bool dark) {
+    return dark ? QJsonArray{0.15, 0.15, 0.15, 1} : QJsonArray{0.929, 0.922, 0.894, 1};
+}
+}
 
 void NativeHud::libraryPanel(double x, double y, double width) {
-    auto &music = *m_music;
-    if (modal == "saved" && music.editable()) {
-        button("＋ 创建歌单", x + width - 220, y + 147, 167, 33, "music:create-playlist", 12);
+    if (modal == "search") {
+        searchPanel(x, y, width);
+        return;
     }
-    if (modal == "saved" && music.provider == "qq") {
-        button("刷新个人库", x + width - 340, y + 147, 110, 33, "music:refresh-personal", 12);
+    savedPanel(x, y, width);
+}
+
+/** 个人资料库沿用检索页的视觉结构；外框尺寸和输入框位置由弹窗宿主保持。 */
+void NativeHud::savedPanel(double x, double y, double width) {
+    libraryToolbar(x, y, width);
+    libraryResultList(x, y, width);
+    libraryFooter(x, y, width);
+}
+
+double NativeHud::libraryToolbarActionWidth() const {
+    if (modal != "saved") {
+        return 0;
     }
-    rule(x + 53, y + 248, width - 106);
-    QStringList filters{"歌曲", "专辑", music.isLocal() ? "文件夹" : "歌单", "歌手"};
-    if (modal == "saved") {
-        filters = music.columns.mid(1, music.provider == "kugou" ? 3 : 4);
+    double total = 0;
+    if (m_music->editable()) {
+        total += LibraryCreateWidth;
     }
-    const auto selected = modal == "saved"
-                              ? musicCollection - 1
-                              : QStringList{"song", "album", "playlist", "artist"}.indexOf(music.searchKind);
+    if (!m_music->isSiren() && !m_music->isLocal()) {
+        total += (total > 0 ? LibraryActionGap : 0) + LibraryRefreshWidth;
+    }
+    return total > 0 ? total + LibraryActionGap : 0;
+}
+
+void NativeHud::libraryOutlineButton(const QRectF &rect, const QString &label, const QString &action,
+                                     double size, bool plus) {
+    const auto line = faintInk(ink(), 0.25);
+    fill(rect.left(), rect.top(), rect.width(), rect.height(), libraryPanelFill(dark));
+    fill(rect.left(), rect.top(), rect.width(), 1, line);
+    fill(rect.left(), rect.bottom() - 1, rect.width(), 1, line);
+    fill(rect.left(), rect.top(), 1, rect.height(), line);
+    fill(rect.right() - 1, rect.top(), 1, rect.height(), line);
+    if (plus) {
+        // 原型按钮的小加号图标；与文字作为一个整体居中。
+        const auto textWidth = m_glyphs->width(label, size, "regular");
+        const auto start = rect.center().x() - (12 + 8 + textWidth) / 2;
+        fill(start + 5.25, rect.center().y() - 6, 1.5, 12, faintInk(ink(), 0.55));
+        fill(start, rect.center().y() - 0.75, 12, 1.5, faintInk(ink(), 0.55));
+        centeredText(label, start + 20, rect.center().y(), size, "regular", false);
+    } else {
+        centeredText(label, rect.center().x(), rect.center().y(), size, "regular", true);
+    }
+    hit(rect.left(), rect.top(), rect.width(), rect.height(), action, label);
+}
+
+void NativeHud::libraryToolbar(double x, double y, double width) {
+    const auto left = x + LibraryInset;
+    const auto usable = width - LibraryInset * 2;
+    const auto muted = mutedInk(ink());
+    const auto gold = accent();
+    const auto barWidth = usable - libraryToolbarActionWidth();
+
+    fill(left, y + LibraryBarTop, barWidth, LibraryBarHeight, libraryBarFill(dark));
+    fill(left, y + LibraryBarTop, 3, LibraryBarHeight, gold);
+    text("QUERY / 检索词", left + 18, y + LibraryBarTop + 10, 9, "regular", 0.08, muted);
+
+    double right = x + width - LibraryInset;
+    if (m_music->editable()) {
+        const QRectF create(right - LibraryCreateWidth, y + LibraryBarTop, LibraryCreateWidth,
+                            LibraryBarHeight);
+        libraryOutlineButton(create, QStringLiteral("创建歌单"), "music:create-playlist", 12, true);
+        right = create.left() - LibraryActionGap;
+    }
+    if (!m_music->isSiren() && !m_music->isLocal()) {
+        const QRectF refresh(right - LibraryRefreshWidth, y + LibraryBarTop, LibraryRefreshWidth,
+                             LibraryBarHeight);
+        libraryOutlineButton(refresh, QStringLiteral("刷新个人库"), "music:refresh-personal", 12);
+    }
+
+    const QStringList filters = m_music->columns.mid(1);
+    const auto selected = musicCollection - 1;
+    double cursor = left;
     for (int index = 0; index < filters.size(); ++index) {
-        const auto spacing = std::min(145.0, (width - 106) / 8);
-        const auto xx = x + 53 + index * spacing;
-        const auto action = modal == "saved" ? "music:collection:" + QString::number(index + 1)
-                                             : "music:kind:" + QString::number(index);
-        button(filters.at(index), xx, y + 266, spacing - 5, 34, action, 12);
-        if (index == selected) {
-            rule(xx, y + 303, std::min(110.0, (width - 106) / 8 - 10), 1);
+        const auto label = filters.at(index);
+        const auto labelWidth = m_glyphs->width(label, 13, "regular");
+        const bool active = index == selected;
+        hit(cursor - 4, y + LibraryTabTop, labelWidth + 8, LibraryTabHeight,
+            "music:collection:" + QString::number(index + 1), label);
+        text(label, cursor, y + LibraryTabTop + 10, 13, active ? "demibold" : "regular", 0,
+             active ? ink() : muted);
+        if (active) {
+            fill(cursor, y + LibraryTabTop + LibraryTabHeight - 3, labelWidth, 3, gold);
         }
+        cursor += labelWidth + 26;
     }
-    const auto lane = modal == "saved" ? musicCollection : 0;
+
+    const auto lane = musicCollection;
     const bool songs =
-        std::any_of(music.lists[lane].begin(), music.lists[lane].end(),
-                    [](const QJsonValue &value) { return value.toObject()["kind"] == "song"; });
+        std::any_of(m_music->lists[lane].cbegin(), m_music->lists[lane].cend(),
+                    [](const QJsonValue &value) { return value.toObject()["kind"].toString() == "song"; });
     if (songs) {
         const QStringList labels{"原序", "歌手分组", "专辑分组"};
         const QStringList keys{"none", "artist", "album"};
+        QVector<double> widths;
+        double total = 0;
+        for (const auto &label : labels) {
+            const auto labelWidth = m_glyphs->width(label, 11, "regular");
+            widths.append(labelWidth);
+            total += labelWidth;
+        }
+        total += 20 * (labels.size() - 1);
+        double sortX = x + width - LibraryInset - total;
+        fill(sortX - 16, y + LibraryTabTop + 6, 1, LibraryTabHeight - 12, faintInk(ink(), 0.18));
         for (int index = 0; index < labels.size(); ++index) {
-            const auto xx = x + width - 340 + index * 96;
-            button(labels.at(index), xx, y + 266, 94, 34, "music:group:" + QString::number(index), 12);
-            if (groupBy == keys.at(index)) {
-                rule(xx, y + 303, 85, 1);
+            const auto label = labels.at(index);
+            const bool active = groupBy == keys.at(index);
+            hit(sortX - 4, y + LibraryTabTop, widths.at(index) + 8, LibraryTabHeight,
+                "music:group:" + QString::number(index), label);
+            text(label, sortX, y + LibraryTabTop + 11, 11, active ? "demibold" : "regular", 0,
+                 active ? ink() : muted);
+            if (active) {
+                fill(sortX, y + LibraryTabTop + LibraryTabHeight - 2, widths.at(index), 2, gold);
             }
+            sortX += widths.at(index) + 20;
         }
     }
+
+    rule(left, y + LibraryTabTop + LibraryTabHeight, usable, 0.18);
+    text("ID / 编号", left, y + LibraryTableY, 9, "regular", 0.07, muted);
+    text("TITLE / 音乐", left + LibraryTitleX, y + LibraryTableY, 9, "regular", 0.07, muted);
+    text("OPEN", x + width - LibraryActionWidth, y + LibraryTableY, 9, "regular", 0.07, muted);
+    rule(left, y + LibraryTableY + 16, usable, 0.24);
+
     if (!activeGroup.isEmpty()) {
-        button("← 全部分组", x + 53, y + 315, 230, 54, "music:group-back", 20, "demibold");
-    } else {
-        text("ID / 编号", x + 53, y + 329, 10);
-        text("TITLE / 音乐", x + 160, y + 329, 10);
-    }
-    text("OPEN", x + width - 136, y + 329, 10);
-    const auto values = rows(lane);
-    listOffset = std::min(listOffset, std::max(0, int(values.size()) - 5));
-    QStringList ids;
-    for (const auto &entry : values) {
-        ids.append(entry.value["key"].toString(entry.value["id"].toString()));
-    }
-    const auto signature =
-        QStringList{modal,       QString::number(lane),       music.keyword, music.searchKind, query, groupBy,
-                    activeGroup, QString::number(listOffset), ids.join('|')}
-            .join('|');
-    for (int index = 0; index < 5 && listOffset + index < values.size(); ++index) {
-        const auto &entry = values.at(listOffset + index);
-        const auto sample = rowMotion(signature, index);
-        const auto yy = y + (activeGroup.isEmpty() ? 365 : 385) + index * 76 + sample[1];
-        save();
-        alpha(sample[0]);
-        rule(x + 53, yy - 12, width - 106, 0.2);
-        limited(entry.value["id"].toString(), x + 53, yy, 12, 100);
-        limited(entry.value["title"].toString(), x + 160, yy, 20, width - 350, "demibold");
-        const auto kind = entry.value["kind"].toString();
-        auto artist = entry.value["artist"].toString();
-        if (artist.isEmpty()) {
-            artist = entry.value["album"].toString();
-        }
-        if (entry.value.contains("playCount")) {
-            artist += " / " + QString::number(entry.value["playCount"].toDouble(), 'f', 0) + " 次播放";
-        }
-        limited((kind == "group" ? "GROUP" : kind.toUpper()) + " / " + artist, x + 160, yy + 30, 11,
-                width - 350);
-        text("查看 ↗", x + width - 136, yy + 8, 12);
-        if (sample[0] > 0.1) {
-            const auto action =
-                kind == "group"
-                    ? "music:expand:" +
-                          QString::fromUtf8(QUrl::toPercentEncoding(entry.value["key"].toString()))
-                    : "music:result:" + QString::number(lane) + ":" + QString::number(entry.index);
-            hit(x + 53, yy - 10, width - 106, 70, action, entry.value["title"].toString());
-        }
-        restore();
-    }
-    if (values.isEmpty()) {
-        limited(music.sourceMessage(lane), x + 53, y + 501, 22, width - 106);
-        if (!music.isLocal() && lane > 0 && music.uid.isEmpty() && !music.restoringAccount) {
-            button("登录" + music.providerName() + " →", x + 53, y + 561, 300, 40, "music:login", 16);
-        }
-    }
-    limited(music.status, x + 53, y + 785, 11, std::max(100.0, width - 650));
-    if (values.size() > 5) {
-        button("上一页 ↑", x + width - 585, y + 775, 100, 35, "music:page-prev", 12);
-        text(QString::number(listOffset + 1) + "–" +
-                 QString::number(std::min(int(values.size()), listOffset + 5)) + " / " +
-                 QString::number(values.size()),
-             x + width - 475, y + 785, 11);
-        if (listOffset + 5 < values.size() || music.hasMore[lane]) {
-            button("下一页 ↓", x + width - 350, y + 775, 100, 35, "music:page-next", 12);
-        }
-    }
-    if (!music.sourceLoading() && music.hasMore[lane]) {
-        button("加载更多 ↓", x + width - 200, y + 775, 147, 35, "music:more:" + QString::number(lane), 12);
+        const auto label = QStringLiteral("← 全部分组");
+        const auto labelWidth = m_glyphs->width(label, 11, "regular") + 16;
+        const auto actionX = x + width - LibraryInset - 150 - labelWidth;
+        hit(actionX, y + LibraryTableY - 7, labelWidth, 28, "music:group-back", "全部分组");
+        text(label, actionX + 8, y + LibraryTableY, 11, "regular", 0, ink());
     }
 }
 
-void NativeHud::discoverPanel(double x, double y, double width) {
-    const auto &music = *m_music;
-    const auto &discover = *music.discover;
-    const auto left = x + 53;
-    const auto usable = width - 106;
-    QVector<QPair<QString, QString>> tabs{{"playlists", "推荐歌单"},
-                                          {"daily", music.provider == "qq" ? "每日 30 首" : "每日推荐"},
-                                          {"charts", "排行榜"},
-                                          {"albums", "新专辑"},
-                                          {"categories", "分类歌单"}};
-    if (music.provider == "qq") {
-        tabs.insert(2, {"guess", "猜你喜欢"});
-        tabs.insert(3, {"new-songs", "新歌速递"});
-    }
-    if (music.provider == "netease") {
-        tabs.append(QPair<QString, QString>{"artists", "收藏歌手"});
-    }
-    tabs.append(QPair<QString, QString>{"history", "历史"});
-    for (int index = 0; index < tabs.size(); ++index) {
-        const auto [key, label] = tabs.at(index);
-        const auto xx = left + index * usable / tabs.size();
-        button(label, xx, y + 195, usable / tabs.size() - 4, 33, "discover:tab:" + key, 12);
-        if (discover.tab == key) {
-            rule(xx, y + 231, usable / tabs.size() - 15, 1);
+void NativeHud::libraryResultList(double x, double y, double width) {
+    const auto left = x + LibraryInset;
+    const auto usable = width - LibraryInset * 2;
+    const auto muted = mutedInk(ink());
+    const QRectF viewport(left, y + ResultListTop, usable, ResultListBottom - ResultListTop);
+    const auto lane = musicCollection;
+    const auto values = rows(lane);
+    savedRowCount = int(values.size());
+    savedScroll = std::clamp(savedScroll, 0., savedScrollMaximum());
+
+    if (values.isEmpty()) {
+        const auto message = m_music->sourceMessage(lane);
+        text(fit(message, 18, usable, "demibold"), left, y + ResultListTop + 92, 18, "demibold");
+        if (!m_music->isLocal() && !m_music->isSiren() && lane > 0 && m_music->uid.isEmpty() &&
+            !m_music->restoringAccount) {
+            libraryOutlineButton(QRectF(left, y + ResultListTop + 132, 300, 44),
+                                 QStringLiteral("登录") + m_music->providerName() + " →", "music:login", 14);
         }
+        return;
     }
-    if (discover.tab == "categories") {
-        QJsonArray categories;
-        if (music.provider != "qq" || discover.categories.isEmpty()) {
-            categories.append(QJsonObject{{"id", "全部"}, {"name", "全部"}});
-        }
-        for (const auto &category : discover.categories) {
-            categories.append(category);
-        }
-        if (categoryPicker) {
-            constexpr int columns = 5;
-            const auto pages =
-                std::max(1, (int(categories.size()) + CategoryPageSize - 1) / CategoryPageSize);
-            categoryPage = std::clamp(categoryPage, 0, pages - 1);
-            text("选择歌单分类", left, y + 244, 15);
-            button("← 返回列表", x + width - 220, y + 244, 167, 33, "discover:categories", 12);
-            constexpr double gap = 8;
-            const auto cellWidth = (usable - gap * (columns - 1)) / columns;
-            const auto top = y + 286;
-            for (int index = 0; index < CategoryPageSize; ++index) {
-                const auto at = categoryPage * CategoryPageSize + index;
-                if (at >= categories.size()) {
-                    break;
-                }
-                const auto category = categories.at(at).toObject();
-                const auto id = category["id"].toString();
-                const auto row = index / columns;
-                const auto column = index % columns;
-                const auto label = (id == discover.category ? "✓ " : "") + category["name"].toString();
-                button(label, left + column * (cellWidth + gap), top + row * 44, cellWidth, 38,
-                       "discover:category:" + QString::fromUtf8(QUrl::toPercentEncoding(id)), 12);
-            }
-            if (categories.size() <= 1) {
-                limited("正在读取分类…", left, top + 46, 14, usable);
-            }
-            limited(QString::number(categoryPage + 1) + " / " + QString::number(pages), left, y + 706, 12,
-                    usable - 350);
-            button("↑ 上一页", x + width - 340, y + 748, 95, 32, "discover:category-page:prev", 12);
-            button("下一页 ↓", x + width - 225, y + 748, 95, 32, "discover:category-page:next", 12);
-            return;
-        }
-        int selected = -1;
-        for (int index = 0; index < categories.size(); ++index) {
-            if (categories.at(index).toObject()["id"] == discover.category) {
-                selected = index;
-                break;
-            }
-        }
-        const auto current = selected < 0 ? QJsonObject() : categories.at(selected).toObject();
-        button("分类：" + current.value("name").toString("全部") + " →", left, y + 244, usable, 33,
-               "discover:categories", 12);
+
+    const auto firstHit = hits.size();
+    save();
+    clip(viewport.x(), viewport.y(), viewport.width(), viewport.height());
+    const auto first = std::max(0, int(std::floor(savedScroll / ResultRowHeight)) - 1);
+    const auto last = std::min(int(values.size()) - 1,
+                               int(std::ceil((savedScroll + viewport.height()) / ResultRowHeight)) + 1);
+    for (int index = first; index <= last; ++index) {
+        const auto rowY = y + ResultListTop + index * ResultRowHeight - savedScroll;
+        resultListRow(values.at(index), x, rowY, width, query, lane);
     }
-    if (discover.tab == "guess") {
-        button("换一批推荐", left, y + 244, 170, 33, "discover:tab:guess", 12);
+    restore();
+    HudScroll::clipHits(hits, int(firstHit), viewport);
+
+    const auto railX = x + width - 24;
+    const auto railTop = viewport.top() + 8;
+    const auto railHeight = viewport.height() - 16;
+    const auto track = QRectF(railX, railTop, 3, railHeight);
+    const auto rail =
+        HudScroll::rail(track, savedRowCount * ResultRowHeight, viewport.height(), savedScroll, 30.);
+    fill(track.x(), track.y(), track.width(), track.height(), faintInk(ink(), 0.10));
+    if (rail.visible) {
+        fill(rail.thumb.x(), rail.thumb.y(), rail.thumb.width(), rail.thumb.height(), faintInk(ink(), 0.45));
     }
-    if (discover.tab == "daily") {
-        button("在资料库打开", left, y + 244, 170, 33, "discover:open", 12);
+}
+
+void NativeHud::libraryFooter(double x, double y, double width) {
+    const auto muted = mutedInk(ink());
+    fill(x + LibraryInset, y + LibraryFooterY + 3, 5, 5, accent());
+    text(fit(m_music->status, 10, width - 320, "regular"), x + LibraryInset + 13, y + LibraryFooterY, 10,
+         "regular", 0, muted);
+
+    const auto lane = musicCollection;
+    const auto loaded = int(m_music->lists[lane].size());
+    if (loaded == 0 && !m_music->sourceLoading()) {
+        return;
     }
-    if (discover.tab == "new-songs" && !discover.newSongAreas.isEmpty()) {
-        const auto count = int(discover.newSongAreas.size());
-        for (int index = 0; index < count; ++index) {
-            const auto area = discover.newSongAreas.at(index).toObject();
-            const auto id = QString::number(area["id"].toInt());
-            const auto xx = left + index * usable / count;
-            button(area["name"].toString(), xx, y + 244, usable / count - 4, 33, "discover:area:" + id, 12);
-            if (id == discover.newSongArea) {
-                rule(xx, y + 281, usable / count - 15, 1);
-            }
-        }
+    const auto total = std::max(m_music->totals[lane], loaded);
+    QString hint = QStringLiteral("全部已载入");
+    if (m_music->sourceLoading()) {
+        hint = QStringLiteral("正在加载…");
+    } else if (m_music->hasMore[lane]) {
+        hint = QStringLiteral("SCROLL / 滚动加载");
     }
-    rule(left, y + 286, usable, 0.5);
-    listOffset = std::min(listOffset, std::max(0, int(discover.items.size()) - 6));
-    for (int row = 0; row < 6 && listOffset + row < discover.items.size(); ++row) {
-        const auto index = listOffset + row;
-        const auto value = discover.items.at(index).toObject();
-        const auto yy = y + 307 + row * 67;
-        text(MusicData::pad(index + 1), left, yy + 8, 11);
-        limited(value["title"].toString(), left + 54, yy + 4, 20, usable * 0.6 - 65, "demibold");
-        limited(value["artist"].toString(), left + usable * 0.64, yy + 8, 13, usable * 0.3 - 25);
-        button(value["kind"] == "song" ? "播放 ▶" : "打开 ↗", left + usable - 68, yy - 3, 68, 35,
-               "discover:item:" + QString::number(index), 11);
-        rule(left, yy + 53, usable, 0.15);
-        hit(left, yy - 4, usable, 60, "discover:item:" + QString::number(index), value["title"].toString());
+    const auto label =
+        QStringLiteral("已载入 ") + QString::number(loaded) + " / " + QString::number(total) + " · " + hint;
+    const auto labelWidth = m_glyphs->width(label, 9, "regular");
+    text(label, x + width - LibraryInset - labelWidth, y + LibraryFooterY, 9, "regular", 0.04, muted);
+}
+
+double NativeHud::savedScrollMaximum() const {
+    return HudScroll::maximum(savedRowCount * ResultRowHeight, ResultListBottom - ResultListTop);
+}
+
+void NativeHud::ensureSavedFilled() {
+    if (modal != "saved" || closing || m_music->sourceLoading() || !m_music->hasMore[musicCollection]) {
+        return;
     }
-    if (discover.items.isEmpty()) {
-        limited(discover.loading ? "正在读取音乐…" : discover.status, left, y + 434, 22, usable);
+    const auto count = int(rows(musicCollection).size());
+    if (count <= m_savedAutoFillSize) {
+        return;
     }
-    limited(discover.status, left, y + 755, 12, usable - 350);
-    button("↑ 上一页", x + width - 340, y + 748, 95, 32, "discover:prev", 12);
-    button("下一页 ↓", x + width - 225, y + 748, 95, 32, "discover:next", 12);
-    if (discover.more) {
-        button(discover.loading ? "载入中…" : "加载更多", x + width - 130, y + 748, 80, 32, "discover:more",
-               12);
+    m_savedAutoFillSize = count;
+    if (count * ResultRowHeight < ResultListBottom - ResultListTop) {
+        m_music->loadMoreSource(musicCollection);
     }
 }
 
 void NativeHud::loginPanel(double x, double y, double width) {
     const auto &music = *m_music;
-    QStringList methods{"qr"};
-    if (music.provider == "qq") {
-        methods = {"qr", "wechat"};
-    } else if (music.provider == "netease") {
-        methods = {"qr", "phone"};
+    const auto &registry = ProviderRegistry::instance();
+    QVector<QJsonObject> methods;
+    for (const auto &value : registry.loginMethods(music.provider)) {
+        if (value.toObject()["id"].isString()) {
+            methods.append(value.toObject());
+        }
     }
-    if (music.provider == "kugou") {
-        const QStringList editions{"standard", "lite"};
-        for (int index = 0; index < editions.size(); ++index) {
-            const auto edition = editions.at(index);
-            const QString label = edition == "lite" ? "酷狗概念版" : "酷狗标准版";
-            button((music.kugouEdition == edition ? "✓ " : "") + label, x + 53 + index * 190, y + 207, 180,
-                   35, "music:kugou-edition:" + edition, 13);
+    const auto variants = registry.variants(music.provider);
+    if (!variants.isEmpty()) {
+        for (int index = 0; index < variants.size(); ++index) {
+            const auto variant = variants.at(index).toObject()["id"].toString();
+            if (variant.isEmpty()) {
+                continue;
+            }
+            const auto label = variants.at(index).toObject()["label"].toString(
+                registry.nameForVariant(music.provider, variant));
+            button((music.providerVariant == variant ? "✓ " : "") + label, x + 53 + index * 190, y + 207,
+                   180, 35, "music:variant:" + variant, 13);
         }
         methods.clear();
     }
-    const QHash<QString, QString> labels{
-        {"qr", music.provider == "qq" ? "手机 QQ 扫码" : music.providerName() + "扫码"},
-        {"wechat", "微信扫码"},
-        {"phone", "短信验证码"}};
     for (int index = 0; index < methods.size(); ++index) {
-        const auto method = methods.at(index);
-        button(labels.value(method), x + 53 + index * 145, y + 207, 140, 35, "music:login-method:" + method,
-               13);
+        const auto method = methods.at(index)["id"].toString();
+        const auto label = methods.at(index)["label"].toString(method);
+        button(label, x + 53 + index * 145, y + 207, 140, 35, "music:login-method:" + method, 13);
     }
     if (QStringList{"qr", "wechat"}.contains(music.loginMethod)) {
         image(music.qr, x + width / 2 - 120, y + 260, 240, 240);
-        if (music.provider == "qq") {
-            const auto lines = m_glyphs->wrap(
-                "QQ 音乐账号只允许本人 7 天内在最多 5 台设备上登录，如登录失败，请在设备管理中删除无用设备。",
-                width - 106, 13);
+        const auto notice = ProviderRegistry::instance().text(music.provider, "deviceNotice");
+        if (!notice.isEmpty()) {
+            const auto lines = m_glyphs->wrap(notice, width - 106, 13);
             for (int index = 0; index < lines.size(); ++index) {
                 text(lines.at(index), x + 53, y + 520 + index * 18, 13);
             }
@@ -281,6 +314,11 @@ void NativeHud::loginPanel(double x, double y, double width) {
             text(label, x + 53, y + 636, 15);
         }
     } else {
+        if (m_contentSink) {
+            m_contentSink->field("account", "手机号码（中国大陆）");
+            m_contentSink->field("captcha", "短信验证码");
+            m_contentSink->field("submit", "登录");
+        }
         text("手机号码（中国大陆）", x + 53, y + 278, 14);
         text("短信验证码", x + 53, y + 391, 14);
         text("按 ENTER 登录", x + 53, y + 532, 12);

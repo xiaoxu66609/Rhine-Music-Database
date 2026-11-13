@@ -136,23 +136,19 @@ void MotionPass::render(QRhiCommandBuffer *commands, QSize dimensions, const QJs
     commands->resourceUpdate(updates);
     updates = nullptr;
     commands->beginPass(m_target, Qt::black, {1, 0});
-#ifdef Q_OS_LINUX
     // 几何剔除：相机与某个 draw 的模型矩阵都没变时，它的屏幕空间速度恒为零，
     // 清屏后的零值就是正确答案，不必再栅格化一遍。105 万三角形里大部分是静态场景，
     // 省掉它们能直接砍掉运动矢量 pass 的几何开销（实测：这一项与分辨率无关）。
     const bool cameraStatic = m_historyValid && unjittered == m_previousViewProjection;
     int skippedDraws = 0;
-#endif
     for (int index = 0; index < draws.size(); ++index) {
         const auto &draw = draws[index];
-#ifdef Q_OS_LINUX
         const auto previousModel = m_previousModels.constFind(draw.id);
         if (cameraStatic && previousModel != m_previousModels.constEnd() &&
             previousModel.value() == draw.matrices) {
             ++skippedDraws;
             continue;
         }
-#endif
         commands->setGraphicsPipeline(pipeline(draw.doubleSided));
         commands->setShaderResources(m_bindings);
         commands->setViewport({0, 0, float(m_size.width()), float(m_size.height())});
