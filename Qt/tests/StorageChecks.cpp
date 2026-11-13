@@ -222,6 +222,9 @@ int main(int argc, char **argv) {
             counted = result["status"] == "cleared" && result["removedFileBytes"].toInteger() == 7;
         }
     }
+    if (!counted) {
+        qCritical().noquote() << QJsonDocument(results).toJson(QJsonDocument::Compact);
+    }
     ok &= check(counted, "metadata result reports removed bytes");
     for (const auto &path : preserved) {
         QFile file(path);

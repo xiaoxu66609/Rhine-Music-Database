@@ -2196,8 +2196,11 @@ void Host::clearLegacyMetadata(StorageCoordinator::Completion done) {
             if (!key.match(entry.fileName()).hasMatch()) {
                 continue;
             }
+            // 必须在删除前取大小。Linux 上文件消失后 QFileInfo::size() 返回 0，
+            // Windows 仍会返回目录枚举时缓存的长度，所以同一个测试只在 Linux 失败。
+            const auto bytes = QFileInfo(entry.absoluteFilePath()).size();
             if (QFile::remove(entry.absoluteFilePath())) {
-                releasedBytes += entry.size();
+                releasedBytes += bytes;
                 ++removed;
             } else if (QFileInfo::exists(entry.absoluteFilePath())) {
                 ++failed;

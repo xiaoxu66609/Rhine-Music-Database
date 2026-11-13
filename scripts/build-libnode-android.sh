@@ -132,6 +132,25 @@ fi
 )
 
 export LDFLAGS="-Wl,-z,max-page-size=16384"
+
+# nodejs-mobile 18.20.4 的 android-configure 只接受 Python 3.8–3.11。
+# install-qt-action 会把 PATH 上的 python3 换成 3.15，所以这里显式把可用解释器放到最前。
+python_for_node=""
+for candidate in python3.11 python3.10 python3.9 python3.8; do
+    if command -v "${candidate}" >/dev/null 2>&1; then
+        python_for_node="$(command -v "${candidate}")"
+        break
+    fi
+done
+if [[ -z "${python_for_node}" ]]; then
+    echo "nodejs-mobile android-configure needs Python 3.8-3.11; python3 is: $(python3 --version 2>&1 || echo missing)" >&2
+    exit 1
+fi
+python_shim="$(mktemp -d)"
+ln -s "${python_for_node}" "${python_shim}/python3"
+ln -s "${python_for_node}" "${python_shim}/python"
+export PATH="${python_shim}:${PATH}"
+
 (
     cd "${SRC}"
     make clean >/dev/null 2>&1 || true

@@ -639,6 +639,11 @@ jobs:
             output/dependencies/qt-android
             output/dependencies/openssl-android
           key: qt-android-kit-${{ steps.qt-kit-key.outputs.signature }}
+      # nodejs-mobile 18.20.4 的 android-configure 拒绝 Python 3.12+。
+      # 上面的 install-qt-action 会把后续步骤的 python3 换成 3.15，必须在出包前改回来。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Build, sign and audit APK
         # 打包脚本内部会重建桥接 bundle（移动端 tmpdir 改写与断言在这里执行）、
         # 下载校验 libnode.so、签名并用 audit-android.py 检查权限白名单。
