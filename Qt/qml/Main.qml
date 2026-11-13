@@ -9,17 +9,25 @@ import Rhine.Native 1.0
 Window {
     id: root
     readonly property bool ios: Qt.platform.os === "ios"
-    readonly property bool touchInput: ios || Qt.platform.os === "android"
+    readonly property bool android: Qt.platform.os === "android"
     width: 1280
     height: 720
-    minimumWidth: touchInput ? 0 : 960
-    minimumHeight: touchInput ? 0 : 540
+    // 移动端是全屏 Activity，窗口尺寸跟随屏幕；给桌面保留的最小尺寸在手机上会把布局顶破。
+    minimumWidth: ios || android ? 0 : 320
+    minimumHeight: ios || android ? 0 : 540
     visible: true
     property bool windowsFrameless: Qt.platform.os === "windows"
     flags: (windowsFrameless ? Qt.FramelessWindowHint : 0) | Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint | Qt.WindowFullscreenButtonHint
     title: "RHINE MUSIC DATABASE"
     color: "#e7e7e1"
-    // 本地导入与下载目录/解密文件选择共用；iOS 无独立入口，须挂载对话框才能响应 Engine 信号。
+    // Tray-close events are intercepted before QML. On an accepted primary-window close,
+    // hide the companion so it cannot keep Qt's last-window quit behavior alive.
+    onClosing: {
+        if (!root.ios) {
+            rhineMv.hideForQuit();
+        }
+    }
+    // 本地导入、插件导入与下载/解密目录共用同一组对话框。iOS 没有另一套入口，必须挂上才能响应 Engine 信号。
     Loader {
         active: true
         sourceComponent: LocalMusicDialogs {

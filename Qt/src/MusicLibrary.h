@@ -1,13 +1,16 @@
 #pragma once
 #include "DownloadCenter.h"
 #include "MusicPlayer.h"
+#include "CommentsController.h"
 #include "LocalMusicLibrary.h"
+#include "LocalCollections.h"
 #include <QHash>
 #include <QSet>
 #include <array>
 #include <memory>
 
 class MusicDiscover;
+class RenderCacheStorage;
 
 struct MusicDirectory {
     std::shared_ptr<MusicDirectory> parent;
@@ -45,10 +48,23 @@ class MusicLibrary : public QObject {
     bool isLocal() const {
         return provider == "local";
     }
+    bool isSiren() const {
+        return provider == "siren";
+    }
     void refreshLocal();
+    void loadSirenSource(int lane);
+    void loadSirenCatalog();
+    void searchSirenLocal(QString query, QString kind, int start, bool more);
+    bool openSirenAllSongs();
+    void clearCaches(StorageCoordinator::Completion done);
+    void storageStats(StorageCoordinator::Completion done);
+    void registerRenderCache(RenderCacheStorage &cache);
+    void clearHistory(StorageCoordinator::Completion done);
     void searchLocal(QString text, QString kind = {});
     void importLocal(const QStringList &paths);
     std::unique_ptr<LocalMusicLibrary> local;
+    std::unique_ptr<LocalCollections> collections;
+    void reloadSirenCollections();
     void observe(int selected);
     void choose(QJsonObject value, bool containerDetails = false,
                 std::optional<bool> showDetails = std::nullopt);
@@ -56,6 +72,7 @@ class MusicLibrary : public QObject {
     void suggest(QString text);
     void showSource(int lane);
     void selectResult(int index, int lane, bool open = true);
+    void selectLibraryIndex(int index);
     void next(int direction);
     void loadMoreSource(int lane);
     void refreshPersonal(int lane);
@@ -63,26 +80,30 @@ class MusicLibrary : public QObject {
     void sameAlbum();
     void loadSongWiki();
     void play(bool byUser = true);
-    void playDirectory();
+    void playDirectory(bool includeAllSongSources = false);
+    void playCollection(QJsonObject value);
     void playOfficial(QJsonObject value = {});
-    QJsonArray directoryQueue() const;
-    QJsonArray currentSongList() const;
+    struct QueueSource {
+        QJsonArray ids;
+        QJsonArray items;
+    };
+    QueueSource directorySource() const;
+    QueueSource currentSource() const;
     QString sourceURL(QJsonObject value = {}) const;
     void setGroupView(QString name, QVector<int> indices = {}, int lane = 0);
     QJsonArray sourceItems(int lane) const;
     QJsonArray libraryItems() const;
     QString libraryName() const;
     QVector<int> sourceOrder() const;
+    bool laneVisible(int lane) const;
     int libraryTotal() const;
     int libraryIndex() const;
     QString providerName() const;
     QString accountKey() const;
     QString identityName() const;
-    bool editable() const {
-        return provider == "netease" || provider == "qq";
-    }
+    bool editable() const;
     bool sourceLoading() const {
-        return restoringAccount || searchLoading || personalLoading;
+        return restoringAccount || searchLoading || personalLoading || sirenCatalogLoading;
     }
     QString sourceMessage(int lane) const;
     bool restoringAccount = false;
@@ -118,7 +139,11 @@ class MusicLibrary : public QObject {
     void showDirectoryInfo();
     void returnToDirectory();
     void leaveDirectory(bool restore = true);
-    void followPlayback(QJsonObject track);
+    void followPlayback(QJsonObject track, bool showDetails = true);
+    bool followPlaybackDetails = true;
+    bool followPlaybackForLyrics = false;
+    // 开启“切歌不打开详情”后，跟随播放只同步列表选择，不迁入详情场景。
+    bool skipDetailOnSwitch = false;
     Host *host;
     MusicApi api;
     MusicPlayer player;
@@ -127,10 +152,16 @@ class MusicLibrary : public QObject {
     void toggleDownloadPick(const QString &id);
     void clearDownloadPicks();
     QJsonArray downloadPickedTracks() const;
+    CommentsController comments;
     std::unique_ptr<MusicDiscover> discover;
     std::array<QJsonArray, 5> lists;
     std::array<int, 5> totals{};
     std::array<int, 5> offsets{};
+    std::array<int, 5> sirenOffsets{};
+    QJsonArray sirenSongs;
+    QJsonArray sirenAlbums;
+    bool sirenCatalogLoading = false;
+    bool m_pendingSirenSearch = false;
     std::array<bool, 5> hasMore{true, true, true, true, true};
     std::array<int, 5> rowMemory{};
     std::array<QVector<int>, 5> physicalSlots;
@@ -145,7 +176,7 @@ class MusicLibrary : public QObject {
     QString keyword;
     QString status = "输入关键词检索音乐";
     QString provider;
-    QString kugouEdition;
+    QString providerVariant;
     QString uid;
     QString nickname = "未登录";
     QHash<QString, QString> identityNames;
@@ -180,11 +211,15 @@ class MusicLibrary : public QObject {
     QSet<QString> subscriptions;
     QHash<QString, QString> subscriptionStates;
     void loadSubscriptionStatus(const QJsonObject &value);
+    bool isSubscribed(const QJsonObject &value) const;
+    std::optional<bool> songLiked(const QJsonObject &value) const;
     QJsonObject capabilities;
     QString vipLevel = "unknown";
-    void refreshQQFeatures();
+    void refreshAccountFeatures();
     bool canEditPlaylist(const QJsonObject &value) const;
     bool canMutate(const QString &route) const;
+    bool supportsOperation(const QString &operation) const;
+    bool commentsAvailable() const;
     QStringList searchHistory;
     QStringList suggestions;
     QString groupName;
@@ -203,6 +238,8 @@ class MusicLibrary : public QObject {
     void musicClearRequested();
 
   private:
+    StorageCoordinator m_storage;
+    void searchInternal(QString text, QString kind, bool more);
     struct Cooldown {
         qint64 deadline = 0;
         QString message;
@@ -215,11 +252,16 @@ class MusicLibrary : public QObject {
     QHash<QString, Cooldown> m_cooldowns;
     quint64 m_generation = 0;
     quint64 m_selectionGeneration = 0;
+    quint64 m_collectionPlayGeneration = 0;
     quint64 m_accountGeneration = 0;
     quint64 m_directoryGeneration = 0;
     quint64 m_wikiGeneration = 0;
     quint64 m_suggestGeneration = 0;
     quint64 m_subscriptionGeneration = 0;
+    quint64 m_playbackLikeGeneration = 0;
+    QString m_playbackLikeContext;
+    void refreshPlaybackLike();
+    void resetLikeState();
     quint64 m_loginGeneration = 0;
     quint64 m_cooldownGeneration = 0;
     qint64 m_smsRetryAtMs = 0;
@@ -230,6 +272,17 @@ class MusicLibrary : public QObject {
     void completePersonal(int lane, QString error = {});
     int m_pendingLane = -1;
     bool m_playLiked = false;
+    struct SourcePlayback {
+        int lane = 0;
+        quint64 account = 0;
+        quint64 search = 0;
+        quint64 selection = 0;
+        int cursor = 0;
+        bool awaitingPage = false;
+    };
+    std::optional<SourcePlayback> m_sourcePlayback;
+    bool m_sourcePlaybackScheduled = false;
+    void continueSourcePlayback();
     QString m_accountError;
     std::array<QString, 5> m_sourceErrors;
     void restoreCachedAccount();
@@ -241,5 +294,4 @@ class MusicLibrary : public QObject {
     void confirmLogin(quint64 token, bool captcha = false);
     void updateSmsCooldown();
     void failLogin(const MusicReply &result);
-    void waitCancellation(QString provider, Completion done);
 };

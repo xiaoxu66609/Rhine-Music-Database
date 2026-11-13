@@ -30,7 +30,18 @@ Item {
     readonly property var chromeHostWindow: windows && controlledHost ? rhineHostWindow : hostWindow
     property bool frameless: controlledHost && Qt.platform.os === "windows"
     readonly property bool ios: Qt.platform.os === "ios"
-    readonly property bool touchInput: ios || Qt.platform.os === "android"
+    readonly property bool compactLayout: rhine.state.compactLayout === true
+    readonly property bool android: Qt.platform.os === "android"
+
+    // 手指比鼠标指针粗：Android 上把每个命中矩形四周各外扩 touchHitPadding 个舞台像素。
+    // 舞台坐标按 1080 高归一化，16 在常见手机上约 1~1.5 mm；按手感调这一个值即可。
+    // 桌面/iOS 取 0，hitArea() 逐值返回原来的矩形，交互行为完全不变。
+    readonly property real touchHitPadding: android ? 16 : 0
+
+    function hitArea(hit) {
+        const pad = overlay.touchHitPadding;
+        return Qt.rect(hit.x - pad, hit.y - pad, hit.width + 2 * pad, hit.height + 2 * pad);
+    }
 
     // 原 Main.qml 直接引用组件内部的 id，拆层后改为函数调用，效果等价。
     function focusInputLayer() {
@@ -81,12 +92,22 @@ Item {
         focus: true
         onPressed: function (mouse) {
             forceActiveFocus();
+            // 双指捏合期间不让第一根手指的事件继续驱动单指旋转。
+            if (viewerPinch.active) {
+                return;
+            }
             rhine.pointer("pointerdown", mouse.x / overlay.stageScale, mouse.y / overlay.stageScale);
         }
         onPositionChanged: function (mouse) {
+            if (viewerPinch.active) {
+                return;
+            }
             rhine.pointer("pointermove", mouse.x / overlay.stageScale, mouse.y / overlay.stageScale);
         }
         onReleased: function (mouse) {
+            if (viewerPinch.active) {
+                return;
+            }
             rhine.pointer("pointerup", mouse.x / overlay.stageScale, mouse.y / overlay.stageScale);
         }
         onExited: rhine.pointer("pointerleave", 0, 0)
@@ -97,6 +118,27 @@ Item {
         }
         Keys.onPressed: function (event) {
             event.accepted = rhine.keyEvent(event.key, event.modifiers, event.text);
+        }
+    }
+    // 阻止事件进入资料库
+    MouseArea {
+        objectName: "playerBarInputShield"
+        property var region: rhine.state.playerBounds
+        visible: !!region
+        x: region ? region.x * overlay.stageScale : 0
+        y: region ? region.y * overlay.stageScale : 0
+        width: region ? region.width * overlay.stageScale : 0
+        height: region ? region.height * overlay.stageScale : 0
+        hoverEnabled: true
+        acceptedButtons: Qt.AllButtons
+        cursorShape: Qt.ArrowCursor
+        onEntered: {
+            rhine.pointer("pointercancel", 0, 0);
+            rhine.pointer("pointerleave", 0, 0);
+        }
+        onPressed: inputLayer.forceActiveFocus()
+        onWheel: function (wheel) {
+            wheel.accepted = true;
         }
     }
     // ── 键盘快捷键（原来放在 Main.qml 的 Window 里，两条路径现在共用这一份） ──
@@ -120,6 +162,9 @@ Item {
         }
         return hostWindow === null ? Qt.ApplicationShortcut : Qt.WindowShortcut;
     }
+    // The offscreen host needs ApplicationShortcut, but auxiliary windows have their own F11.
+    // Scope window actions to the real host so Qt does not treat the two bindings as ambiguous.
+    readonly property bool hostShortcutsEnabled: !controlledHost || rhineHostWindow.active
     Shortcut {
         sequences: [StandardKey.Quit]
         context: overlay.shortcutContext
@@ -128,11 +173,13 @@ Item {
     Shortcut {
         sequences: Qt.platform.os === "osx" ? [StandardKey.FullScreen, "F11"] : ["F11"]
         context: overlay.shortcutContext
+        enabled: overlay.hostShortcutsEnabled
         onActivated: rhine.toggleFullscreen()
     }
     Shortcut {
         sequence: "F10"
         context: overlay.shortcutContext
+        enabled: overlay.hostShortcutsEnabled
         onActivated: profiler.toggleVisible()
     }
     Item {
@@ -145,10 +192,11 @@ Item {
             model: rhine.hits
             delegate: Item {
                 required property var modelData
-                x: modelData.x
-                y: modelData.y + (rhine.state.modal && !modelData.fixed ? rhine.state.modalOffset || 0 : 0)
-                width: modelData.width
-                height: modelData.height
+                property rect area: overlay.hitArea(modelData)
+                x: area.x
+                y: area.y + (rhine.state.modal && !modelData.fixed ? rhine.state.modalOffset || 0 : 0)
+                width: area.width
+                height: area.height
                 Accessible.role: Accessible.Button
                 Accessible.name: modelData.label
                 Accessible.onPressAction: rhine.action(modelData.action)
@@ -159,12 +207,12 @@ Item {
                     onEntered: rhine.pointer("pointerleave", 0, 0)
                     onPressed: {
                         inputLayer.forceActiveFocus();
-                        if (!overlay.touchInput) {
+                        if (!overlay.ios) {
                             rhine.action(modelData.action);
                         }
                     }
                     onClicked: {
-                        if (overlay.touchInput) {
+                        if (overlay.ios) {
                             rhine.action(modelData.action);
                         }
                     }
@@ -176,10 +224,135 @@ Item {
                 }
             }
         }
+        // 检索与个人库
+        MouseArea {
+            id: searchScrollArea
+            visible: rhine.state.modal === "search" || rhine.state.modal === "saved"
+            enabled: visible
+            x: rhine.state.searchListX || 0
+            y: (rhine.state.searchListY || 0) + (rhine.state.modalOffset || 0)
+            width: rhine.state.searchListWidth || 0
+            height: rhine.state.searchListHeight || 0
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            property real dragOriginY: 0
+            property real lastDragY: 0
+            property bool dragged: false
+            onEntered: rhine.pointer("pointerleave", 0, 0)
+            onPressed: {
+                if (rhine.state.closing) {
+                    return;
+                }
+                dragOriginY = mouse.y;
+                lastDragY = mouse.y;
+                dragged = false;
+            }
+            onPositionChanged: function (mouse) {
+                if (!pressed || rhine.state.closing) {
+                    return;
+                }
+                if (Math.abs(mouse.y - dragOriginY) > 6) {
+                    dragged = true;
+                }
+                if (dragged) {
+                    // 拖拽距离先换算成窗口像素，再沿用手势层的滚轮换算。
+                    var p = mapToItem(inputLayer, mouse.x, mouse.y);
+                    var previous = mapToItem(inputLayer, mouse.x, lastDragY);
+                    var delta = p.y - previous.y;
+                    if (delta !== 0) {
+                        rhine.wheelInput(p.x / overlay.stageScale, p.y / overlay.stageScale, delta, 0);
+                        lastDragY = mouse.y;
+                    }
+                }
+            }
+            onReleased: {
+                if (rhine.state.closing || dragged) {
+                    return;
+                }
+                var px = (rhine.state.searchListX || 0) + mouse.x;
+                var py = (rhine.state.searchListY || 0) + mouse.y;
+                for (var index = 0; index < rhine.hits.length; ++index) {
+                    var hit = rhine.hits[index];
+                    var area = overlay.hitArea(hit);
+                    var inside = px >= area.x && px <= area.x + area.width && py >= area.y && py <= area.y + area.height;
+                    var scrollable = hit.action.indexOf("music:result:") === 0 || hit.action.indexOf("music:expand:") === 0;
+                    if (inside && scrollable) {
+                        rhine.action(hit.action);
+                        break;
+                    }
+                }
+            }
+            onWheel: function (wheel) {
+                var p = mapToItem(inputLayer, wheel.x, wheel.y);
+                rhine.wheelInput(p.x / overlay.stageScale, p.y / overlay.stageScale, wheel.pixelDelta.y, wheel.angleDelta.y);
+                wheel.accepted = true;
+            }
+        }
     }
-    IOSInput {
+    TouchInput {
         stage: overlay
         backend: rhine
+    }
+    // 封面查看页的触控：单指拖动交给 inputLayer → NativeViewer 做球面旋转；
+    // 双指捏合走与桌面滚轮同一条通路做缩放；双指拖动（质心位移）做平移。
+    // 只收触摸屏事件，桌面鼠标与滚轮语义不变。
+    PinchHandler {
+        id: viewerPinch
+        target: null
+        acceptedDevices: PointerDevice.TouchScreen
+        enabled: !!rhine.state.viewer
+        // 双指平移的差分锚点：上一次质心的场景坐标。
+        property point lastPan: Qt.point(0, 0)
+        // 把双指质心相对上次的位移转发成 pan（x/y 是舞台像素增量，与
+        // NativeViewer::pointer 的 "pan" 分支约定一致）。同时挂两个信号是
+        // 双保险：Qt 版本不同，translationChanged 与 centroidChanged 哪个存在
+        // 都能触发；都存在时第二次调用位移差为 0，天然幂等。
+        function forwardPan() {
+            if (!active) {
+                return;
+            }
+            const now = centroid.scenePosition;
+            const dx = now.x - lastPan.x;
+            const dy = now.y - lastPan.y;
+            lastPan = now;
+            // 首帧质心坐标未就绪时的异常跳变直接丢弃，防止画面甩飞。
+            if (dx === 0 && dy === 0 || Math.abs(dx) > overlay.width * 0.4 || Math.abs(dy) > overlay.height * 0.4) {
+                return;
+            }
+            rhine.pointer("pan", dx / overlay.stageScale, dy / overlay.stageScale);
+        }
+        onActiveChanged: {
+            if (active) {
+                // 第二根手指落下时结束可能已开始的单指旋转，避免两个手势叠加。
+                rhine.pointer("pointercancel", 0, 0);
+            }
+            // 手势开始/结束时重置差分锚点；active 瞬间质心可能未就绪，
+            // forwardPan 的大位移保护会兜住这种情况。
+            lastPan = active ? centroid.scenePosition : Qt.point(0, 0);
+        }
+        // Qt 6 的 activeScale 没有 onActiveScaleChanged：它的 NOTIFY 是
+        // scaleChanged(delta)，delta 就是这一帧捏合距离的乘法变化量。
+        onScaleChanged: function (delta) {
+            if (!active || !isFinite(delta) || delta <= 0) {
+                return;
+            }
+            // wheelInput 的正 delta 在 viewer 里缩小相机半径（放大画面）。
+            // 350 来自 NativeViewer 的 pow(0.95, 0.7*|delta|*0.01) 与 -delta*8 的换算：
+            // 让 log(捏合比例) 线性映射到与桌面滚轮同样的缩放速度。
+            const p = centroid.scenePosition;
+            rhine.wheelInput(p.x / overlay.stageScale, p.y / overlay.stageScale, Math.log(delta) * 350, 0);
+        }
+    }
+    // 双指质心位移 → 平移。Connections 的函数语法在信号不存在时只会静默跳过
+    // （不会像 onXxx: 属性赋值那样让整个 Overlay 加载失败）。
+    Connections {
+        target: viewerPinch
+        function onTranslationChanged() {
+            viewerPinch.forwardPan();
+        }
+        function onCentroidChanged() {
+            viewerPinch.forwardPan();
+        }
     }
     // 验证码只在输入组件和单次登录请求中短暂存在，提交后立即清空。
     Item {
@@ -197,6 +370,12 @@ Item {
                 accountField.forceActiveFocus();
             }
         }
+        readonly property bool accountVisible: !overlay.compactLayout || !!rhine.state.compactaccount
+        readonly property bool captchaVisible: !overlay.compactLayout || !!rhine.state.compactcaptcha
+        readonly property bool submitVisible: !overlay.compactLayout || !!rhine.state.compactsubmit
+        readonly property real accountTop: overlay.compactLayout && rhine.state.compactaccount ? rhine.state.compactaccount.y : 430
+        readonly property real captchaTop: overlay.compactLayout && rhine.state.compactcaptcha ? rhine.state.compactcaptcha.y : 541
+        readonly property real submitTop: overlay.compactLayout && rhine.state.compactsubmit ? rhine.state.compactsubmit.y : (rhine.state.modal === "login" ? 611 : 530)
         function submit() {
             if (rhine.state.modal === "login" && rhine.state.loginBusy) {
                 return;
@@ -205,8 +384,9 @@ Item {
             captchaField.text = "";
         }
         Rectangle {
+            visible: formFields.accountVisible
             x: 0
-            y: 430 * overlay.stageScale
+            y: formFields.accountTop * overlay.stageScale
             width: rhine.state.modal === "login" ? parent.width - 180 * overlay.stageScale : parent.width
             height: 55 * overlay.stageScale
             color: rhine.state.dark ? "#30312b" : "#d9d8ce"
@@ -214,8 +394,9 @@ Item {
         TextInput {
             id: accountField
             objectName: "accountField"
+            visible: formFields.accountVisible
             x: 14 * overlay.stageScale
-            y: 430 * overlay.stageScale
+            y: formFields.accountTop * overlay.stageScale
             width: parent.width - (rhine.state.modal === "login" ? 208 : 28) * overlay.stageScale
             height: 55 * overlay.stageScale
             verticalAlignment: TextInput.AlignVCenter
@@ -236,9 +417,9 @@ Item {
             Keys.onEscapePressed: rhine.action("close-modal")
         }
         Rectangle {
-            visible: rhine.state.modal === "login"
+            visible: rhine.state.modal === "login" && formFields.accountVisible
             x: parent.width - width
-            y: 430 * overlay.stageScale
+            y: formFields.accountTop * overlay.stageScale
             width: 170 * overlay.stageScale
             height: 55 * overlay.stageScale
             enabled: !rhine.state.loginBusy && rhine.state.smsRetrySeconds === 0 && accountField.text.length === 11
@@ -263,9 +444,9 @@ Item {
             }
         }
         Rectangle {
-            visible: rhine.state.modal === "login"
+            visible: rhine.state.modal === "login" && formFields.captchaVisible
             x: 0
-            y: 541 * overlay.stageScale
+            y: formFields.captchaTop * overlay.stageScale
             width: parent.width
             height: 55 * overlay.stageScale
             color: rhine.state.dark ? "#30312b" : "#d9d8ce"
@@ -273,9 +454,9 @@ Item {
         TextInput {
             id: captchaField
             objectName: "captchaField"
-            visible: rhine.state.modal === "login"
+            visible: rhine.state.modal === "login" && formFields.captchaVisible
             x: 14 * overlay.stageScale
-            y: 541 * overlay.stageScale
+            y: formFields.captchaTop * overlay.stageScale
             width: parent.width - 28 * overlay.stageScale
             height: 55 * overlay.stageScale
             verticalAlignment: TextInput.AlignVCenter
@@ -290,8 +471,9 @@ Item {
             Keys.onEscapePressed: rhine.action("close-modal")
         }
         Rectangle {
+            visible: formFields.submitVisible
             x: parent.width - width
-            y: (rhine.state.modal === "login" ? 611 : 530) * overlay.stageScale
+            y: formFields.submitTop * overlay.stageScale
             enabled: rhine.state.modal !== "login" || !rhine.state.loginBusy
             width: 170 * overlay.stageScale
             height: 36 * overlay.stageScale
@@ -320,9 +502,11 @@ Item {
             visible: !!region
             enabled: visible && !rhine.state.closing
             x: region ? region.x * overlay.stageScale : 0
-            y: region ? (region.y + (rhine.state.modal ? rhine.state.modalOffset || 0 : 0)) * overlay.stageScale : 0
+            // 播放栏固定在窗口下沿，不随弹窗入场偏移。竖向多留一点触摸余量；
+            // 横向保持原样，否则 adjustPlayer 用 mouse.x/width 算出的比例会偏。
+            y: region ? (region.y - overlay.touchHitPadding) * overlay.stageScale : 0
             width: region ? region.width * overlay.stageScale : 0
-            height: region ? region.height * overlay.stageScale : 0
+            height: region ? (region.height + 2 * overlay.touchHitPadding) * overlay.stageScale : 0
             cursorShape: Qt.PointingHandCursor
             onPressed: function (mouse) {
                 rhine.adjustPlayer(modelData, mouse.x, width);
@@ -341,25 +525,26 @@ Item {
         width: searchInput.width
         height: searchInput.height
         color: rhine.state.dark ? "#ffffff" : "#141613"
-        opacity: (rhine.state.modalOpacity || 0) * 0.045
+        // 检索条背景由原生面板绘制；其他弹窗仍使用原来的轻遮罩。
+        opacity: (rhine.state.modal === "search" || rhine.state.modal === "saved") ? 0 : (rhine.state.modalOpacity || 0) * 0.045
     }
     TextInput {
         id: searchInput
         objectName: "musicSearchInput"
         verticalAlignment: TextInput.AlignVCenter
-        leftPadding: 14 * overlay.stageScale
+        leftPadding: overlay.compactLayout ? 0 : 18 * overlay.stageScale
         rightPadding: 14 * overlay.stageScale
         renderType: Text.NativeRendering
-        visible: rhine.state.modal === "search" || rhine.state.modal === "saved"
+        visible: (rhine.state.modal === "search" || rhine.state.modal === "saved") && (!overlay.compactLayout || rhine.state.compactInputVisible === true)
         enabled: !rhine.state.closing
         x: (rhine.state.inputX || 0) * overlay.stageScale
         y: ((rhine.state.inputY || 302) + (rhine.state.modalOffset || 0)) * overlay.stageScale
         width: (rhine.state.inputWidth || 0) * overlay.stageScale
-        height: 54 * overlay.stageScale
+        height: (overlay.compactLayout ? (rhine.state.inputHeight || 54) : 54) * overlay.stageScale
         font.family: rhineFontFamily
-        font.pixelSize: 22 * overlay.stageScale
-        color: rhine.state.dark ? "#ebebeb" : "#141613"
-        opacity: rhine.state.modalOpacity || 0
+        font.pixelSize: (overlay.compactLayout ? 14 * rhine.state.compactUnit : 22) * overlay.stageScale
+        color: (rhine.state.modal === "search" || rhine.state.modal === "saved") ? (rhine.state.dark ? "#e9e7da" : "#222a25") : (rhine.state.dark ? "#ebebeb" : "#141613")
+        opacity: overlay.compactLayout ? 1 : (rhine.state.modalOpacity || 0)
         clip: true
         cursorVisible: activeFocus && !rhine.performance.idle
         selectByMouse: true
@@ -384,8 +569,48 @@ Item {
             font: searchInput.font
             leftPadding: searchInput.leftPadding
             verticalAlignment: Text.AlignVCenter
-            color: "#777777"
+            color: (rhine.state.modal === "search" || rhine.state.modal === "saved") ? (rhine.state.dark ? "#a2aa9d" : "#626b60") : "#777777"
         }
+    }
+    // 通用设置文本输入：位置由 Schema 行控制区提供，原生面板只负责背景与命中。
+    Rectangle {
+        id: settingEditBackground
+        visible: rhine.state.editingSetting === true
+        x: (rhine.state.editingSettingX || 0) * overlay.stageScale
+        y: ((rhine.state.editingSettingY || 0) + (rhine.state.modalOffset || 0)) * overlay.stageScale
+        width: (rhine.state.editingSettingWidth || 0) * overlay.stageScale
+        height: (rhine.state.editingSettingHeight || 0) * overlay.stageScale
+        color: rhine.state.dark ? "#2b332c" : "#e5e7da"
+        border.width: 1 * overlay.stageScale
+        border.color: rhine.state.dark ? "#4a554b" : "#aab0a0"
+    }
+    TextInput {
+        id: settingEditInput
+        objectName: "musicSettingEditInput"
+        visible: rhine.state.editingSetting === true
+        x: settingEditBackground.x + 12 * overlay.stageScale
+        y: settingEditBackground.y
+        width: Math.max(0, settingEditBackground.width - 24 * overlay.stageScale)
+        height: settingEditBackground.height
+        verticalAlignment: TextInput.AlignVCenter
+        font.family: rhineFontFamily
+        font.pixelSize: 16 * overlay.stageScale
+        color: rhine.state.dark ? "#e9e7da" : "#222a25"
+        clip: true
+        selectByMouse: true
+        cursorVisible: activeFocus && !rhine.performance.idle
+        Accessible.name: "设置文本"
+        onTextEdited: rhine.settingEditText(text)
+        onVisibleChanged: {
+            if (visible) {
+                text = rhine.state.editingSettingValue || "";
+                forceActiveFocus();
+            } else {
+                inputLayer.forceActiveFocus();
+            }
+        }
+        Keys.onReturnPressed: rhine.settingEditAccepted()
+        Keys.onEscapePressed: rhine.settingEditCancel()
     }
     // 两条呈现路径共用真实宿主的窗口按钮、拖动与边缘缩放。
     Loader {

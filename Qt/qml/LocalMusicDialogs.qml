@@ -30,6 +30,16 @@ Item {
         onAccepted: backend.importLocal(selectedFiles)
     }
     FolderDialog {
+        id: pluginFolderDialog
+        objectName: "pluginFolderDialog"
+        Binding on parentWindow {
+            when: Qt.platform.os === "windows"
+            value: dialogs.hostWindow
+        }
+        title: "导入插件文件夹"
+        onAccepted: backend.importPluginFolder(selectedFolder)
+    }
+    FolderDialog {
         id: downloadFolderDialog
         objectName: "downloadFolderDialog"
         Binding on parentWindow {
@@ -51,28 +61,6 @@ Item {
         nameFilters: ["QQ 音乐加密 / 网易云 NCM (*.mflac *.mflac0 *.mgg *.mgg0 *.mgg1 *.qmc0 *.qmcflac *.qmcogg *.ncm)"]
         onAccepted: backend.decryptLocal(selectedFiles)
     }
-    Connections {
-        target: backend
-        function onLocalImportRequested(folder: bool) {
-            if (folder) {
-                localFolderDialog.open();
-            } else {
-                localFileDialog.open();
-            }
-        }
-        function onDownloadDirectoryRequested() {
-            downloadFolderDialog.open();
-        }
-        function onDownloadDecryptRequested() {
-            decryptFileDialog.open();
-        }
-        function onDownloadDecryptFolderRequested() {
-            decryptFolderDialog.open();
-        }
-        function onDownloadDecryptDirectoryRequested() {
-            decryptOutFolderDialog.open();
-        }
-    }
     FolderDialog {
         id: decryptFolderDialog
         objectName: "decryptFolderDialog"
@@ -92,5 +80,30 @@ Item {
         }
         title: "选择解密输出目录"
         onAccepted: backend.setDecryptDirectory(selectedFolder)
+    }
+    Connections {
+        target: backend
+        function onLocalImportRequested(folder: bool) {
+            if (folder) {
+                localFolderDialog.open();
+            } else {
+                localFileDialog.open();
+            }
+        }
+        function onPluginImportRequested() {
+            pluginFolderDialog.open();
+        }
+        function onDownloadDirectoryRequested() {
+            downloadFolderDialog.open();
+        }
+        function onDownloadDecryptRequested() {
+            decryptFileDialog.open();
+        }
+        function onDownloadDecryptFolderRequested() {
+            decryptFolderDialog.open();
+        }
+        function onDownloadDecryptDirectoryRequested() {
+            decryptOutFolderDialog.open();
+        }
     }
 }

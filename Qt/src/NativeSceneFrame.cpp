@@ -40,13 +40,21 @@ QJsonObject NativeScene::sample(double time, bool advance) {
         timings.simulateMs = simulation / 1000000.0;
         timings.metadataMs = (clock.nsecsElapsed() - simulation) / 1000000.0;
     }
-    m_changed = false;
+    // 详情 HUD 的整块内容被 alpha(frame["detail"]) 包着，而 frame["detail"] 由
+    // m_detail 推出，只在 update() 里按帧收敛。这里若无条件清掉 changed，引擎会在
+    // 淡入完成前判定「场景稳定」并休眠，m_detail 冻结在 0 —— 详情整页透明，
+    // 但 hits 已经注册，于是「按钮能点、画面空白、点一下（wake）才显示」。
+    // 开唱片旋转能绕过，正是因为 m_discRotating 让 workPending 恒真、引擎不休眠。
+    // 把「详情淡入未收敛」也算作场景有变化，让所有依赖 scene.changed() 的判据
+    // （reuse / workPending / m_sceneSleeping）自动保持工作，不另设定时器。
+    const bool detailFading = m_mode == "detail" && frame.value("detail").toDouble() < 0.99;
+    m_changed = detailFading;
     return frame;
 }
 
 /** 直接交付原生缓冲区；场景 JSON 只保存小型材质与相机参数，没有跨引擎数值转换。 */
 void NativeScene::emitFrame(double time) {
-    QSet<int> retained{1, 3};
+    QSet<int> retained{1};
     const auto theme = m_theme.background(m_clock);
     QJsonArray draws;
     auto floor = m_appearance.floor(theme);
@@ -55,7 +63,6 @@ void NativeScene::emitFrame(double time) {
     floor["matrices"] = QJsonArray{};
     draws.append(floor);
     const auto instanceBytes = drawBuffers.value(10);
-    QJsonObject shadow;
     for (const auto &entry : m_appearance.instances) {
         auto draw = entry.toObject();
         const auto id = draw["id"].toInt();
@@ -68,22 +75,14 @@ void NativeScene::emitFrame(double time) {
         draw["theme"] = theme;
         drawBuffers[id] = instanceBytes;
         draws.append(draw);
-        if (draw["name"] == "Optical_Diffuser") {
-            draw["id"] = 3;
-            draw["shadowOnly"] = true;
-            draw["castShadow"] = true;
-            draw["count"] = drawBuffers.value(3).matrices.size() / 64;
-            shadow = draw;
-        }
-    }
-    if (!shadow.isEmpty()) {
-        draws.append(shadow);
     }
     QJsonArray returningKeys;
+    double returningAgeMax = 0;
     for (const auto &actor : m_returning) {
         if (!actor.musicKey.isEmpty()) {
             returningKeys.append(actor.musicKey);
         }
+        returningAgeMax = std::max(returningAgeMax, actor.age);
     }
     frame = {{"pendingAnimations", m_viewer->pending()},
              {"pointerCursor", m_cursor},
@@ -102,6 +101,7 @@ void NativeScene::emitFrame(double time) {
              {"returningPartNodes", 0},
              {"globalSubdued", 0},
              {"returningMusicKeys", returningKeys},
+             {"returningAgeMax", returningAgeMax},
              {"time", time},
              {"draws", draws},
              {"view", m_view.json()},
@@ -162,6 +162,7 @@ void NativeScene::emitFrame(double time) {
     frame["culledCards"] = culled;
     frame["shadowCards"] = shadowOnly;
     frame["actorTemplate"] = m_appearance.actorTemplate;
+    frame["appearanceRevision"] = double(m_appearance.revision);
     frame["actors"] = actors;
     failure = m_cards.expand(frame, actorBytes, drawBuffers);
     for (auto entry = drawBuffers.begin(); entry != drawBuffers.end();) {

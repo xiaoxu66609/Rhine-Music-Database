@@ -1,5 +1,6 @@
 #include <QtGlobal>
 #include "PlaybackConnection.h"
+#include "MobileTarget.h"
 #include "AppStorage.h"
 #include <QCoreApplication>
 #include <QDir>
@@ -7,7 +8,7 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QJsonDocument>
-#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
+#if !RHINE_MOBILE
 #include <QProcess>
 #endif
 #include <QThread>
@@ -15,7 +16,7 @@
 #include <memory>
 #include <utility>
 
-#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
+#if !RHINE_MOBILE
 /** 桌面端连接同一用户的唯一服务；移动端不允许拉起独立音频服务进程。 */
 bool connectPlaybackService(PlaybackConnection &connection, const QString &root, QString &error) {
     const auto endpoint = PlaybackConnection::endpoint();
@@ -173,12 +174,17 @@ void PlaybackConnection::readMessages() {
             emit activateRequested();
         } else if (message["event"] == "quit") {
             emit quitRequested();
+        } else if (message["event"] == "storage.invalidated") {
+            emit storageInvalidated();
 #ifdef Q_OS_LINUX
         } else if (message["event"] == "restart") {
             emit restartRequested();
 #endif
         } else if (message["event"] == "diagnostic") {
             emit diagnosticEvent(message["name"].toString(), message["values"].toObject());
+        } else if (message["event"] == "spectrum" && message["levels"].isArray() &&
+                   message["levels"].toArray().size() == 40) {
+            emit spectrumChanged(message["levels"].toArray());
         }
         const auto id = message["id"].toString();
         if (m_pending.contains(id)) {

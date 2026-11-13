@@ -1,15 +1,22 @@
 #include <QtGlobal>
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) || defined(Q_OS_DARWIN)
 #include <ctime>
 #endif
 #include "Engine.h"
 #include "DiscGeometry.h"
 #include "RhiScene.h"
+#include "fg/FgCapability.h"
+#include "fg/FgStats.h"
+#include "render/MemoryProbe.h"
+#if defined(Q_OS_ANDROID)
+#include "render/HudDirtyRect.h"
+#endif
 #include <QCoreApplication>
 #include <QDir>
 #include <QEvent>
 #include <QEventLoop>
 #include <QFile>
+#include <QGuiApplication>
 #include <QJsonDocument>
 #include <QPainter>
 #include <QQuickWindow>
@@ -38,19 +45,38 @@ bool runNativeHostChecks(const QString &root);
 bool runNativeMusicChecks(const QString &root);
 
 /** 建立纯原生音乐、HUD 和场景状态；Qt 定时器只在输入或动画尚未收束时运行。 */
-Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *connection)
+Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *connection,
+               RenderCacheStorage *renderCache)
     : QObject(parent), host(path, offline, nullptr, false, connection), scene(path), m_glyphs(path) {
     // FSR3 抖动默认关闭；环境变量在进程启动时读取一次，运行期不再变化。
     m_jitterEnabled = qEnvironmentVariableIntValue("RHINE_JITTER") == 1;
     const auto content = QJsonDocument::fromJson(host.read("slots.json").toUtf8()).object();
     app = std::make_unique<NativeApplication>(&host, &m_glyphs, &scene, content);
+    if (renderCache) {
+        app->music.registerRenderCache(*renderCache);
+    }
+    connect(&app->shortcuts, &GlobalShortcuts::activated, this, [this](const QString &action) {
+        if (action != "window" || !m_window) {
+            return;
+        }
+        if (m_window->isVisible() && m_window->isActive()) {
+            m_window->hide();
+        } else {
+            m_window->setWindowStates(m_window->windowStates() & ~Qt::WindowMinimized);
+            m_window->show();
+            m_window->raise();
+            m_window->requestActivate();
+        }
+    });
     connect(&app->music, &MusicLibrary::playbackInvalidated, this, &Engine::refreshPlayback);
     connect(&app->hud, &NativeHud::localImportRequested, this, &Engine::localImportRequested);
+    connect(&app->hud, &NativeHud::pluginImportRequested, this, &Engine::pluginImportRequested);
     connect(&app->hud, &NativeHud::downloadDirectoryRequested, this, &Engine::downloadDirectoryRequested);
     connect(&app->hud, &NativeHud::downloadDecryptRequested, this, &Engine::downloadDecryptRequested);
     connect(&app->hud, &NativeHud::downloadDecryptFolderRequested, this, &Engine::downloadDecryptFolderRequested);
     connect(&app->hud, &NativeHud::downloadDecryptDirectoryRequested, this,
             &Engine::downloadDecryptDirectoryRequested);
+    connect(&app->hud, &NativeHud::mvRequested, this, &Engine::mvRequested);
 #ifdef Q_OS_DARWIN
     renderConfiguration.initialize([this](const QString &key) { return host.preference(key); });
     connect(&host, &Host::preferenceChanged, this, [this](const QString &key, const QString &value) {
@@ -64,36 +90,93 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
     app->initialize();
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this,
             [this] { app->saveSession(); });
-    connect(&host, &Host::invalidated, this, [this] { wake(false); });
+    connect(&host, &Host::invalidated, this, [this] { wake(WakeSource::Host); });
     connect(&host, &Host::mediaChanged, this, &Engine::pollMedia, Qt::QueuedConnection);
     connect(&host, &Host::mediaAction, this, [this](QString value) {
         app->mediaAction(value);
         wake();
     });
     clock.start();
+    // B01：一次性定时器到点后只做一件事——核对焦点是否还稳定、到时，然后主动通知
+    // 呈现层出一帧。不能靠"继续出帧等到期"：引擎静止时根本没有下一帧。
+    m_admissionScheduler.setHandler([this](const QString &key, quint64 generation) {
+        if (m_admission.expire(key, generation, clock.elapsed())) {
+            requestSceneContent();
+        }
+    });
     timer.setTimerType(Qt::PreciseTimer);
     connect(&timer, &QTimer::timeout, this, &Engine::tick);
     mediaTimer.setInterval(1000);
     connect(&mediaTimer, &QTimer::timeout, this, &Engine::pollMedia);
+#ifdef Q_OS_IOS
+    // 恢复前台时先同步媒体状态，画面休眠期间也可能已经起播或换曲。
+    connect(qGuiApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
+        if (state == Qt::ApplicationActive && QGuiApplication::applicationState() == Qt::ApplicationActive) {
+            pollMedia();
+        }
+    }, Qt::QueuedConnection);
+    QTimer::singleShot(0, this, &Engine::pollMedia);
+#endif
+    connect(&m_gamepad, &Gamepad::pressed, this, &Engine::gamepadPressed);
     // 节拍诊断（RHINE_PACE_DIAG=1）：每秒打印一次「引擎 tick 数 vs 实际渲染数」，
     // 用来判定帧率是被引擎定时器限住、还是被呈现侧限住。
     if (qEnvironmentVariableIsSet("RHINE_PACE_DIAG")) {
         auto *diag = new QTimer(this);
         diag->setInterval(1000);
         connect(diag, &QTimer::timeout, this, [this] {
-            static quint64 lastSteps = 0, lastScene = 0, lastHud = 0, lastRender = 0;
+            // C01：同一个窗口里同时给三种"帧"计数，均值一律用总量除以对应次数：
+            //   tick   —— 引擎定时器回调次数（含被合并掉的空转）
+            //   step   —— 真正跑完的完整 step 次数
+            //   render —— 渲染线程上报的实际呈现/绘制次数
+            static quint64 lastSteps = 0, lastSkipped = 0, lastScene = 0, lastHud = 0, lastRender = 0,
+                           lastWakes = 0, lastRequests = 0, lastChanged = 0, lastResetInput = 0,
+                           lastResetScene = 0, lastGpuSamples = 0;
             const quint64 render = m_renderFrames.load(std::memory_order_relaxed);
+            const quint64 gpuMicros = m_gpuTimeMicros.load(std::memory_order_relaxed);
             const double avgGap = m_paceTicks > 1 ? double(m_paceGapSum) / (m_paceTicks - 1) / 1e6 : 0;
             const double avgStep = m_paceTicks > 0 ? double(m_paceStepSum) / m_paceTicks / 1e6 : 0;
-            qInfo("节拍诊断: tick/s=%llu sceneUpd/s=%llu hudUpd/s=%llu render/s=%llu "
+            const quint64 published = m_pacing.published();
+            const quint64 consumed = m_pacing.consumed();
+            qInfo("节拍诊断: tick/s=%llu step/s=%llu skip/s=%llu sceneUpd/s=%llu hudUpd/s=%llu "
+                  "render/s=%llu changed/s=%llu "
+                  "wake/s=%llu(输入 %llu/Host %llu/媒体 %llu/其他 %llu) req/s=%llu "
+                  "gpu=%.2fms(最近已完成帧,%s,n=%llu) sync场=%.2fms(n=%llu) "
+                  "published=%llu consumed=%llu 未消费差=%llu "
                   "interval=%dms timerActive=%d sleeping=%d sceneSleeping=%d rotating=%d "
-                  "hudAnimating=%d | 间隔均=%.2fms 最大=%.2fms step均=%.2fms 最大=%.2fms",
-                  qulonglong(m_steps) - lastSteps, qulonglong(m_sceneUpdates) - lastScene,
-                  qulonglong(m_hudUpdates) - lastHud, qulonglong(render) - lastRender, timer.interval(),
-                  int(timer.isActive()), int(m_sleeping), int(m_sceneSleeping), int(m_discRotating),
-                  int(app->hud.animating(m_animationTime)), avgGap, double(m_paceGapMax) / 1e6, avgStep,
-                  double(m_paceStepMax) / 1e6);
+                  "hudAnimating=%d pendingAnim=%d stableFrames=%d "
+                  "stableReset/s=%llu(输入 %llu/场景 %llu) | "
+                  "间隔均=%.2fms 最大=%.2fms step均=%.2fms 最大=%.2fms",
+                  // 格式串有 36 个转换符，实参也必须 36 个：这里少给过 tick/s 一项，
+                  // 导致从第 2 项起整串错位（req/s 打印成被当 %llu 读的 double，
+                  // gpu=%.2f 收到的是 const char*），读数全部作废。
+                  qulonglong(m_paceTicks), qulonglong(m_steps) - lastSteps,
+                  qulonglong(m_pacing.skipped()) - lastSkipped, qulonglong(m_sceneUpdates) - lastScene,
+                  qulonglong(m_hudUpdates) - lastHud, qulonglong(render) - lastRender,
+                  qulonglong(m_changedSteps) - lastChanged, qulonglong(m_wakes) - lastWakes,
+                  qulonglong(m_wakesInput), qulonglong(m_wakesHost), qulonglong(m_wakesMedia),
+                  qulonglong(m_wakesOther), qulonglong(m_sceneRequests) - lastRequests, gpuMicros / 1000.0,
+                  RhineRender::gpuTimingStatusName(
+                      RhineRender::GpuTimingStatus(m_gpuTiming.load(std::memory_order_relaxed))),
+                  qulonglong(m_gpuSamples) - lastGpuSamples,
+                  m_syncMicros.load(std::memory_order_relaxed) / 1000.0,
+                  qulonglong(m_syncSamples.load(std::memory_order_relaxed)), qulonglong(published),
+                  qulonglong(consumed), qulonglong(published > consumed ? published - consumed : 0),
+                  timer.interval(), int(timer.isActive()), int(m_sleeping), int(m_sceneSleeping),
+                  int(m_discRotating), int(app->hud.animating(m_animationTime)),
+                  int(m_frame.value("pendingAnimations").toBool()), m_stableFrames,
+                  qulonglong(m_stableResetInput) + qulonglong(m_stableResetScene) - lastResetInput -
+                      lastResetScene,
+                  qulonglong(m_stableResetInput) - lastResetInput,
+                  qulonglong(m_stableResetScene) - lastResetScene, avgGap, double(m_paceGapMax) / 1e6,
+                  avgStep, double(m_paceStepMax) / 1e6);
             lastSteps = qulonglong(m_steps);
+            lastSkipped = qulonglong(m_pacing.skipped());
+            lastWakes = m_wakes;
+            lastChanged = m_changedSteps;
+            lastRequests = m_sceneRequests;
+            lastGpuSamples = m_gpuSamples;
+            lastResetInput = m_stableResetInput;
+            lastResetScene = m_stableResetScene;
             lastScene = qulonglong(m_sceneUpdates);
             lastHud = qulonglong(m_hudUpdates);
             lastRender = render;
@@ -110,6 +193,7 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
 Engine::~Engine() {
     timer.stop();
     mediaTimer.stop();
+    m_gamepad.setEnabled(false);
     app.reset();
     host.shutdown();
 }
@@ -117,6 +201,14 @@ bool Engine::ready() const {
     return scene.ready();
 }
 namespace {
+// 连续像素累积多少舞台像素算一步（一行 / 一首歌）。Android 的手指滑动很容易误触切歌，
+// 把「翻一首歌」需要的距离放大 5 倍：15 → 75。用编译期分支隔离，其它平台仍是原来的 15；
+// 只影响 wheel() 的步进，m_wheelDistance 那条连续滚动通路不受影响。
+#if defined(Q_OS_ANDROID)
+constexpr double WHEEL_STEP_PIXELS = 75.;
+#else
+constexpr double WHEEL_STEP_PIXELS = 15.;
+#endif
 // 鼠标滚轮一格的距离按设置页与歌词的行高换算，约一行内容；触控板保留系统给出的连续像素距离。
 constexpr double WHEEL_DISTANCE_PER_NOTCH = 80;
 // 鼠标滚轮的离散事件按帧衰减送出，约 0.1 秒内收束，避免整格内容瞬间跳变。
@@ -207,36 +299,218 @@ void Engine::start() {
     wake(false);
 }
 QVariantMap Engine::performance() const {
-    return {{"idle", m_sleeping},
-            {"sceneSleeping", m_sceneSleeping},
-            {"visible", m_visible},
-            {"steps", qulonglong(m_steps)},
-            {"sceneUpdates", qulonglong(m_sceneUpdates)},
-            {"hudUpdates", qulonglong(m_hudUpdates)},
-            {"renderFrames", qulonglong(m_renderFrames.load(std::memory_order_relaxed))},
-            {"gpuResources", qulonglong(m_gpuResources.load(std::memory_order_relaxed))},
-            {"bindingCreations", qulonglong(m_bindingCreations.load(std::memory_order_relaxed))},
-            {"gpuMusicTextureBytes", qulonglong(m_musicTextureBytes.load(std::memory_order_relaxed))},
-            {"coverUploads", qulonglong(m_coverUploads.load(std::memory_order_relaxed))},
-            {"gpuDrawCalls", qulonglong(m_lastDrawCalls.load(std::memory_order_relaxed))},
-            {"timerActive", timer.isActive()}};
+    QVariantMap result = {
+        {"idle", m_sleeping},
+        {"sceneSleeping", m_sceneSleeping},
+        {"visible", m_visible},
+        {"steps", qulonglong(m_steps)},
+        {"sceneUpdates", qulonglong(m_sceneUpdates)},
+        {"hudUpdates", qulonglong(m_hudUpdates)},
+        {"renderFrames", qulonglong(m_renderFrames.load(std::memory_order_relaxed))},
+        {"gpuResources", qulonglong(m_gpuResources.load(std::memory_order_relaxed))},
+        {"bindingCreations", qulonglong(m_bindingCreations.load(std::memory_order_relaxed))},
+        {"gpuMusicTextureBytes", qulonglong(m_musicTextureBytes.load(std::memory_order_relaxed))},
+        {"coverUploads", qulonglong(m_coverUploads.load(std::memory_order_relaxed))},
+        {"gpuDrawCalls", qulonglong(m_lastDrawCalls.load(std::memory_order_relaxed))},
+        {"timerActive", timer.isActive()}};
+    const quint64 gpuMicros = m_gpuTimeMicros.load(std::memory_order_relaxed);
+    // 0 表示后端没有可用的时间戳；保留空值，避免把“未测量”显示成 0 ms。
+    if (gpuMicros) {
+        result.insert("gpuTimeMs", gpuMicros / 1000.0);
+    }
+    // 状态无条件发布：没有样本时它正是唯一能说明"为什么没有"的信息，而 gpuTimeMs 的
+    // 缺省只表示"这次没测到"。两者语义不同，不能让前者被后者吞掉（A01）。
+    result.insert("gpuTimingStatus",
+                  QString::fromLatin1(RhineRender::gpuTimingStatusName(
+                      RhineRender::GpuTimingStatus(m_gpuTiming.load(std::memory_order_relaxed)))));
+
+    // ---- A11 整帧资源账本 ----
+    // 下面这些键和上面的"当前快照"不是同一口径，命名与 CSV 列都带 ledger/peak 前缀，
+    // 避免分析脚本把"窗口峰值"当成"本帧值"。峰值窗口 = 最近 kLedgerWindow 个渲染帧。
+    const quint64 renderFrames = m_renderFrames.load(std::memory_order_relaxed);
+    const quint64 coverUploads = m_coverUploads.load(std::memory_order_relaxed);
+    result.insert("gpuResourcesPeak", qulonglong(m_resourcesPeak.load(std::memory_order_relaxed)));
+    result.insert("gpuResourcesPeakFrame", qulonglong(m_resourcesPeakFrame.load(std::memory_order_relaxed)));
+    result.insert("gpuTextureBytesPeak", qulonglong(m_textureBytesPeak.load(std::memory_order_relaxed)));
+    result.insert("gpuTextureBytesPeakFrame",
+                  qulonglong(m_textureBytesPeakFrame.load(std::memory_order_relaxed)));
+    result.insert("frameBindings", qulonglong(m_frameBindings.load(std::memory_order_relaxed)));
+    result.insert("frameCoverUploads", qulonglong(m_frameCoverUploads.load(std::memory_order_relaxed)));
+    result.insert("coverUploadsPerFrame",
+                  m_coverUploadsPerFrameMilli.load(std::memory_order_relaxed) / 1000.0);
+    // 重传率：累计封面上传次数按"每千个渲染帧"归一。用千帧而不是比值，是因为正常情况
+    // 下每帧上传次数远小于 1，比值会长期贴在 0.0x 这种没有分辨率的刻度上。
+    result.insert("coverRetransmitPerKFrame",
+                  renderFrames ? coverUploads * 1000.0 / double(renderFrames) : 0.0);
+    const quint64 budgetBytes = resourceBudgetBytes();
+    result.insert("resourceBudgetMb", qulonglong(budgetBytes / (1024ull * 1024ull)));
+    return result;
+}
+
+quint64 Engine::resourceBudgetBytes() {
+    // 默认 0 = 关闭。只接受正数；写错（负数/非数字）按关闭处理，避免把预算误当 1 字节。
+    static const quint64 bytes = [] {
+        bool ok = false;
+        const qlonglong mb = qEnvironmentVariable("RHINE_RESOURCE_BUDGET_MB").toLongLong(&ok);
+        return ok && mb > 0 ? quint64(mb) * 1024ull * 1024ull : quint64(0);
+    }();
+    return bytes;
+}
+
+/** A11：渲染线程每帧调用一次，维护滚动窗口峰值、本帧增量与封面上传速率。 */
+void Engine::noteFrameLedger(quint64 resources, quint64 bindings, quint64 textureBytes,
+                             quint64 coverUploads) {
+    // frame 已经是 ++ 之后的值：对外的帧号口径与 renderFrames 一致（1 基）。
+    const quint64 frame = m_renderFrames.load(std::memory_order_relaxed);
+    m_frameBindings.store(bindings, std::memory_order_relaxed);
+    m_frameCoverUploads.store(coverUploads, std::memory_order_relaxed);
+
+    // 封面上传速率用 EMA（alpha=0.05，约 20 帧窗口）：单帧样本抖动大，而"是不是每帧
+    // 都在重传"恰恰要看持续水平。不用呈现层那套 0.15，是为了压住偶发的一两次上传。
+    m_coverUploadsEma = m_coverUploadsEma <= 0.0 ? double(coverUploads)
+                                                 : m_coverUploadsEma * 0.95 + double(coverUploads) * 0.05;
+    m_coverUploadsPerFrameMilli.store(quint64(m_coverUploadsEma * 1000.0 + 0.5), std::memory_order_relaxed);
+
+    const bool full = m_ledgerFilled >= kLedgerWindow;
+    const LedgerSlot expired = m_ledgerWindow[m_ledgerCursor];
+    m_ledgerWindow[m_ledgerCursor] = LedgerSlot{frame, resources, textureBytes};
+    m_ledgerCursor = (m_ledgerCursor + 1) % kLedgerWindow;
+    if (!full) {
+        ++m_ledgerFilled;
+    }
+
+    // 三种情况必须重算：窗口还没填满（峰值帧号可能变）、出现更大的样本、或者刚被
+    // 覆盖掉的旧样本正好是当前峰值的持有者（最大值离开了窗口）。其余情况沿用旧峰值，
+    // 不用每帧扫 240 个槽——这是渲染线程上的热路径。
+    const quint64 resourcesPeak = m_resourcesPeak.load(std::memory_order_relaxed);
+    const quint64 texturePeak = m_textureBytesPeak.load(std::memory_order_relaxed);
+    if (!full || resources >= resourcesPeak || textureBytes >= texturePeak ||
+        expired.resources == resourcesPeak || expired.textureBytes == texturePeak) {
+        recomputeLedgerPeaks();
+    }
+
+    // 预算告警：只打印一次，不改渲染行为。让预算触发降级会把"诊断"变成隐藏的
+    // 质量开关，之后所有对比数据都失去可比性。
+    const quint64 budgetBytes = resourceBudgetBytes();
+    if (budgetBytes > 0 && textureBytes > budgetBytes &&
+        !m_budgetWarned.exchange(true, std::memory_order_relaxed)) {
+        const double currentMiB = double(textureBytes) / (1024.0 * 1024.0);
+        const double budgetMiB = double(budgetBytes) / (1024.0 * 1024.0);
+        qWarning().noquote() << QStringLiteral("资源预算超限：整帧驻留纹理 %1 MiB 超过上限 %2 MiB"
+                                               "（RHINE_RESOURCE_BUDGET_MB，第 %3 个渲染帧）。"
+                                               "建议：减少同时驻留的封面数或降低封面尺寸，"
+                                               "也可以把上限调到 %4 MiB 以上。本告警只打印一次，"
+                                               "不改变渲染行为。")
+                                    .arg(currentMiB, 0, 'f', 1)
+                                    .arg(budgetMiB, 0, 'f', 1)
+                                    .arg(frame)
+                                    .arg(currentMiB, 0, 'f', 0);
+    }
+}
+
+/** 按时间顺序扫一遍环形窗口，取资源个数/纹理字节的滚动峰值及其持有帧号。 */
+void Engine::recomputeLedgerPeaks() {
+    quint64 bestResources = 0, bestResourcesFrame = 0;
+    quint64 bestTextureBytes = 0, bestTextureBytesFrame = 0;
+    // 从最老的槽开始按时间顺序遍历，`>=` 让相同峰值取更新的那一帧（复查时更有意义）。
+    for (int i = 0; i < m_ledgerFilled; ++i) {
+        const LedgerSlot &slot = m_ledgerWindow[(m_ledgerCursor + i) % kLedgerWindow];
+        if (slot.resources >= bestResources) {
+            bestResources = slot.resources;
+            bestResourcesFrame = slot.frame;
+        }
+        if (slot.textureBytes >= bestTextureBytes) {
+            bestTextureBytes = slot.textureBytes;
+            bestTextureBytesFrame = slot.frame;
+        }
+    }
+    m_resourcesPeak.store(bestResources, std::memory_order_relaxed);
+    m_resourcesPeakFrame.store(bestResourcesFrame, std::memory_order_relaxed);
+    m_textureBytesPeak.store(bestTextureBytes, std::memory_order_relaxed);
+    m_textureBytesPeakFrame.store(bestTextureBytesFrame, std::memory_order_relaxed);
 }
 /** 仅在画面变化时通知唯一场景，静止时保留按需休眠。 */
 void Engine::notifySceneRenderers(bool visualChanged) {
     if (visualChanged) {
+        // A03：版本只在真的推进内容时自增。呈现层拿它当"这一帧有没有新内容"的唯一判据，
+        // 重复推同一个值不会造成重复重渲；而信号是没法这么用的——同一个内容变化会被
+        // 场景帧、HUD、异步资源到达各触发一次。
+        m_sceneRevision.fetch_add(1, std::memory_order_relaxed);
         emit sceneUpdated();
     }
 }
+
+/** A03：渲染线程上报"新资源已就位"。语义与一次真实的视觉变化相同，只是触发者不是帧字段。 */
+void Engine::requestSceneContent() {
+    ++m_sceneRequests;
+    notifySceneRenderers(true);
+    // C04：资源就绪也算一次"视觉快照发布"。它不推进模拟，但要让节拍知道
+    // "还有一份没被消费"，否则下一拍会当成无事可做。
+    m_pacing.publish(sceneRevision(), clock.elapsed());
+}
+/**
+ * C04：渲染线程在 synchronize() 里调用。只写原子序号，再排一次队列回调；不在渲染线程
+ * 等 GUI，也不做任何可能阻塞的分配。
+ */
+void Engine::noteSceneConsumed(quint64 revision) {
+    if (revision == 0) {
+        return;
+    }
+    const quint64 previous = m_sceneConsumed.load(std::memory_order_relaxed);
+    if (revision <= previous) {
+        return;
+    }
+    m_sceneConsumed.store(revision, std::memory_order_relaxed);
+    // 同一个序号只排一次唤醒：渲染线程可能连续同步很多帧。
+    quint64 notified = m_consumeNotified.load(std::memory_order_relaxed);
+    if (revision > notified && m_consumeNotified.compare_exchange_strong(notified, revision)) {
+        QMetaObject::invokeMethod(this, "sceneConsumed", Qt::QueuedConnection);
+    }
+}
+void Engine::sceneConsumed() {
+    m_pacing.consume(m_sceneConsumed.load(std::memory_order_relaxed));
+    // 渲染线程已经取走上一份，待办动画／输入需要下一拍；不该靠 1ms 轮询自己撞上。
+    if (m_started && m_visible && !timer.isActive()) {
+        m_lastTick = clock.elapsed();
+        timer.start(0);
+    }
+}
 void Engine::wake(bool input) {
+    wake(input ? WakeSource::Input : WakeSource::Other);
+}
+void Engine::wake(WakeSource source) {
+    switch (source) {
+    case WakeSource::Input:
+        ++m_wakesInput;
+        m_inputPending = true;
+        break;
+    case WakeSource::Host:
+        ++m_wakesHost;
+        break;
+    case WakeSource::Media:
+        ++m_wakesMedia;
+        break;
+    case WakeSource::Other:
+        ++m_wakesOther;
+        break;
+    }
+    ++m_wakes;
+    const bool input = source == WakeSource::Input;
     const bool wasSleeping = m_sleeping;
     const auto now = clock.elapsed();
     if (input) {
         m_lastInput = now;
         m_sceneSleeping = false;
+        if (m_stableFrames != 0) {
+            ++m_stableResetInput;
+        }
         m_stableFrames = 0;
         scene.energyIdle(false);
     } else if (scene.changed()) {
         m_sceneSleeping = false;
+        if (m_stableFrames != 0) {
+            ++m_stableResetScene;
+        }
         m_stableFrames = 0;
     }
     m_sleeping = !m_visible;
@@ -264,11 +538,61 @@ void Engine::resetTemporalState() {
     wake(false);
     notifySceneRenderers(true);
 }
+#ifdef Q_OS_DARWIN
+void Engine::publishFrameGenerationCapability(bool available, const QString &reason) {
+    // Apple 不再接管呈现层，但默认窗口内的补帧能力对设置页而言等价于“已接管”。
+    RhineFg::publishCapability(true, true, available, reason);
+    if (qEnvironmentVariableIsSet("RHINE_METAL_FG_DIAG")) {
+        qInfo().noquote() << "MetalFX FG capability:" << (available ? "可用" : "不可用") << reason;
+    }
+    emit stateChanged();
+}
+void Engine::publishFrameGenerationStats(quint64 presented, quint64 interpolated, quint64 rendered,
+                                         bool available, bool wanted, bool active, bool depthReady,
+                                         bool motionReady, QSize renderSize, QSize displaySize) {
+    auto stats = RhineFg::stats();
+    stats.layerActive = active;
+    stats.defaultWindow = true;
+    stats.interpolationAvailable = available;
+    stats.interpolationWanted = wanted;
+    stats.interpolationActive = active;
+    stats.depthReady = depthReady;
+    stats.motionVectorsReady = motionReady;
+    stats.presented = presented;
+    stats.interpolated = interpolated;
+    stats.rendered = rendered;
+    stats.renderSize = renderSize;
+    stats.displaySize = displaySize;
+    stats.presentMode = QStringLiteral("Qt Quick 默认窗口");
+    RhineFg::publish(stats);
+}
+#endif
+/**
+ * B01：把当前列表焦点交给准入状态机。每帧调用，但只有焦点 key 真的换了才会重新计时；
+ * 同 key 重复帧、封面晚到、revision 变化都不重计时（见 MusicTextureAdmission::focus）。
+ */
+void Engine::submitTextureAdmission(const QString &musicKey) {
+    const auto status = m_admission.focus(musicKey, clock.elapsed());
+    if (status.pending) {
+        if (status.generation != m_admissionArmed) {
+            // 代号变了才 arm：同一焦点若每帧 arm 一次，到期时间会被无限推后。
+            m_admissionArmed = status.generation;
+            m_admissionScheduler.arm(m_admission.delayMs(), m_admission.pendingKey(), status.generation);
+        }
+        return;
+    }
+    m_admissionArmed = status.generation;
+    m_admissionScheduler.stop();
+}
 void Engine::setVisible(bool value) {
+#ifdef Q_OS_IOS
+    value = value && QGuiApplication::applicationState() == Qt::ApplicationActive;
+#endif
     if (m_visible == value) {
         return;
     }
     m_visible = value;
+    m_gamepad.setEnabled(value);
     if (!value) {
         flushPointer();
         app->pointer("pointercancel", 0, 0);
@@ -278,7 +602,11 @@ void Engine::setVisible(bool value) {
         m_wheelRemainingDistance = 0;
         timer.stop();
         m_sleeping = true;
+        // 隐藏期间不创建 GPU 资源：作废"等到一半"的等待，恢复后重新计时。
+        m_admission.setVisible(false, clock.elapsed());
+        m_admissionScheduler.stop();
     } else {
+        m_admission.setVisible(true, clock.elapsed());
         host.restoreMemoryBudget();
 #ifdef Q_OS_DARWIN
         if (renderConfiguration.snapshot().temporal()) {
@@ -287,7 +615,10 @@ void Engine::setVisible(bool value) {
 #endif
         wake(false);
         notifySceneRenderers(true);
-        emit hudUpdated();
+        m_hudRevision.fetch_add(1, std::memory_order_relaxed);
+        // 重新显示时纹理可能已经被丢弃，命令流没有差异也必须整块重画。
+        m_hudDirtyFull = true;
+        publishHudFrame();
     }
     emit stateChanged();
 }
@@ -306,10 +637,13 @@ void Engine::trimMemory() {
         }
     }
     host.trimMemory(retainedImages);
+    // Host 把封面像素丢了，引擎这边记录的"已请求过"也必须一起忘掉，
+    // 否则回到前台后这些唱片再也不会去补图。
+    m_coverRequests.clear();
     scene.trimMemory();
-}
-void Engine::pausePanelPlayback() {
-    app->music.player.setPaused(true);
+#ifdef Q_OS_DARWIN
+    m_glyphs.clearRasterCache();
+#endif
 }
 /** 播放栏按需重绘时保持资源库休眠；只有可见的旋转或歌词动画需要连续调度。 */
 void Engine::refreshPlayback() {
@@ -327,9 +661,20 @@ void Engine::refreshPlayback() {
 }
 
 void Engine::pollMedia() {
+    // 后台排障心跳：mediaTimer 由事件循环驱动，这条日志能证明（或证伪）后台事件循环
+    // 是否仍在运转——「后台不切歌、控件失灵」的定位全靠它划界。
+    if (QGuiApplication::applicationState() != Qt::ApplicationActive) {
+        static qint64 lastHeartbeat = -100000;
+        if (clock.elapsed() - lastHeartbeat >= 10000) {
+            lastHeartbeat = clock.elapsed();
+            qInfo("background media poll alive");
+        }
+    }
     app->poll(clock.elapsed() / 1000.0, true);
     const auto &player = app->music.player;
-    const bool active = player.loading || player.state["playing"].toBool();
+    const bool waitingOrPlaying = player.state["requested"].toBool() || player.state["playing"].toBool() ||
+                                  player.state["buffering"].toBool();
+    const bool active = player.loading || (waitingOrPlaying && player.state["error"].toString().isEmpty());
     if (active && !mediaTimer.isActive()) {
         mediaTimer.start();
     }
@@ -348,6 +693,33 @@ void Engine::flushPointer() {
  * 推进本帧动画并决定是否继续调度。
  * 状态收束后允许待机，输入和后台数据失效会重新唤醒。
  */
+void Engine::updateDetailGrace(qint64 nowMs) {
+    const bool inDetail = m_frame.value("mode").toString() == "detail";
+    if (inDetail && m_detailEnterWallMs < 0) {
+        m_detailEnterWallMs = nowMs;
+    } else if (!inDetail) {
+        m_detailEnterWallMs = -1;
+    }
+    // 覆盖完整淡入 + 余量；墙钟不受休眠/pacing 影响，稳态零开销。
+    m_detailGrace = m_detailEnterWallMs >= 0 && nowMs - m_detailEnterWallMs < 1200;
+}
+void Engine::publishHudFrame() {
+#if defined(Q_OS_ANDROID)
+    // 标脏与「允许连轴转」必须互斥。HUD 命令流变了但渲染线程还没画进纹理时，
+    // tick() 的 0/1ms QTimer 会一直抢在 Qt Quick 的 render sync 之前重新投递，
+    // GUI 事件循环里那个 update request 永远排不上队。置位后 tick() 让出时间，
+    // 直到 Hud::updatePaintNode() 真正跑过再清位。
+    m_hudFramePending.store(true, std::memory_order_relaxed);
+    m_hudFramePendingSinceMs = clock.elapsed();
+    // HUDFLOW 诊断（第六轮，默认开、限流）：命令流发布的节律与宽限状态。
+    static int publishCount = 0;
+    if (++publishCount % 120 == 1) {
+        qWarning("HUDFLOW 发布 #%d: grace=%d 过渡窗口=%d", publishCount, int(m_detailGrace),
+                 int(clock.elapsed() < m_hudTransitionUntilMs));
+    }
+#endif
+    emit hudUpdated();
+}
 void Engine::tick() {
     const qint64 enterNs = clock.nsecsElapsed();
     if (m_paceEnterNs != 0) {
@@ -357,6 +729,53 @@ void Engine::tick() {
     }
     m_paceEnterNs = enterNs;
     const auto now = clock.elapsed();
+    // 详情淡入宽限期：用真实墙钟（clock.elapsed）判定，必须在 tick() 层。
+    // 死锁成因：scene.changed() 只在 sample() 末尾更新，sample() 只在 reuse==false 时
+    // 被调用，reuse 却又依赖 scene.changed()；一旦引擎休眠就再也出不来。而 m_detail
+    // 挂在 m_animationTime 这个「每帧最多 +50ms、休眠即停」的伪时钟上，于是
+    // frame["detail"] 永远停在淡入中间值，HUD 的 alpha() 就一直是半透明。
+    // 前三轮把判据写在 step() 里全部无效——step() 被 pacing Skip / 休眠跳过时，
+    // m_hudTransitionUntilMs 连初始值都不会被设置，所有保护都不触发。
+    // 判据放在 tick() 层，并在 step() 更新 m_frame 后再重算一次（见 updateDetailGrace）。
+    updateDetailGrace(now);
+    // C04：完整 step 只在"这一份快照还有机会被看到"时跑。渲染线程还没取走上一份，
+    // 现在算出来的中间状态会被直接覆盖——这部分 CPU 在任何一帧上都看不到。
+    const bool inputPending = m_inputPending || m_wheelPending || m_pressed || m_pointerPending;
+    // 页面过渡期视为「有工作」：否则 pacing 会因为上一份快照还没被消费而 Skip 掉整帧，
+    // 引擎也可能直接休眠，HUD 的命令流就停在这一帧（开唱片旋转能绕过正是这个道理）。
+    // hudFramePending 必须一并算进来：过渡窗口结束后若 HUD 还没被场景图画过，
+    // 这里一放行就会把最后一次纹理上传也吃掉。
+#if defined(Q_OS_ANDROID)
+    const bool hudNeedsPresent = hudFramePending();
+#else
+    const bool hudNeedsPresent = false;
+#endif
+    const bool hudTransition = clock.elapsed() < m_hudTransitionUntilMs || m_detailGrace || hudNeedsPresent;
+    const bool workPending = inputPending || scene.changed() || !m_sceneSleeping || m_discRotating ||
+                             app->hud.animating(m_animationTime) || hudTransition ||
+                             m_frame.value("pendingAnimations").toBool() || m_temporalFramesRemaining > 0 ||
+                             m_frame.value("mode") == "boot";
+    if (!inputPending && !hudTransition) {
+        const auto decision = m_pacing.decide(workPending, false, now);
+        if (decision.action == RhineRender::FramePacingPolicy::Action::Skip) {
+            m_pacing.noteStep(true);
+            ++m_stepsSkipped;
+            ++m_paceTicks;
+            // 1ms 只为尽早看到消费进度；这一次 tick 本身几乎不花钱。
+            timer.setInterval(1);
+            return;
+        }
+    }
+#ifdef Q_OS_MACOS
+    // 毫秒时钟尚未前进时不重算同一动画状态；输入与时域收敛帧仍立即处理。
+    if (!inputPending && now == m_lastTick && !scene.changed() && m_temporalFramesRemaining == 0) {
+        m_pacing.noteStep(true);
+        ++m_stepsSkipped;
+        ++m_paceTicks;
+        timer.setInterval(1);
+        return;
+    }
+#endif
     m_animationTime += qMin<qint64>(now - m_lastTick, 50) / 1000.;
     m_lastTick = now;
     flushPointer();
@@ -386,8 +805,12 @@ void Engine::tick() {
     m_paceStepSum += stepNs;
     m_paceStepMax = qMax(m_paceStepMax, stepNs);
     ++m_paceTicks;
+    // C04：发布序号就是内容版本；没有视觉变化时这里不会前进，策略自然放行下一拍。
+    m_pacing.publish(sceneRevision(), clock.elapsed());
+    m_pacing.noteStep(false);
+    m_inputPending = false;
     // 动态帧间隔：不设固定周期常数，帧率上限完全交给呈现侧（垂直同步/缓冲回收）。
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) || defined(Q_OS_DARWIN)
     // 注意 blockedNs 的口径：它只覆盖 tick() 内部、step() 之外的微秒级开销（指针 flush、
     // 滚轮衰减、energyIdle），**测不到呈现阻塞**——呈现工作在 PresentationShell 的另一个
     // 定时器回调里，根本不在 tick() 的调用栈内。所以这里恒走 interval=1：渲染期间 GUI
@@ -399,22 +822,48 @@ void Engine::tick() {
     //   · 阻塞 ≤ 2ms：说明呈现不阻塞，继续连轴转只会空转烧 CPU，让出 1ms。
 #endif
     // RHINE_TICK_MS 仍可作为排障时人为压帧的覆盖值（>0 时生效）。
-    const qint64 frameNs = clock.nsecsElapsed() - enterNs;
-    const qint64 blockedNs = frameNs - stepNs;
     const int fixedMs = frameIntervalMs();
     const bool rotationOnly = m_discRotating && m_sceneSleeping && !app->hud.animating(m_animationTime) &&
                               now - m_lastInput >= 750 && !m_pressed;
-    int intervalMs = blockedNs > 2000000 ? 0 : 1;
+    // C04：节奏只由"上一份快照有没有被消费"决定。tick() 内部量到的 frameNs-stepNs
+    // 测不到呈现阻塞（呈现工作在别的回调里），原来用它推断节流只会恒定落到 1ms。
+    int intervalMs = m_pacing.awaitingConsumption() ? 1 : 0;
     if (rotationOnly) {
         intervalMs = 33;
     }
+#if defined(Q_OS_ANDROID)
+    // 根因修复：HUD 命令流已发布、但渲染线程还没调过 Hud::updatePaintNode() 时，
+    // 绝不能连轴转。0/1ms 的 QTimer 会在 GUI 事件循环里抢在 Qt Quick 的 update
+    // request 之前反复投递，render sync 永远排不上队 —— QQuickPaintedItem 标了脏，
+    // 纹理却停在上一页：顶部/底部还在，新增的右侧详情卡片整块空白，按钮能点。
+    // 真机证据：休眠后进详情时 draw() 以 1~3ms/帧连轴转、40 帧截图逐字节相同；
+    // 开唱片旋转（rotationOnly → 33ms）或点一下（打断连轴转）就正常。
+    // 这里让出 8ms（≈120Hz 一帧）给事件循环，等渲染线程消费后自动恢复 0/1ms，
+    // 稳态零开销。2 秒兜底防止窗口长期不可见时永远不让步。
+    if (m_hudFramePending.load(std::memory_order_relaxed)) {
+        if (now - m_hudFramePendingSinceMs > 2000) {
+            m_hudFramePending.store(false, std::memory_order_relaxed);
+        } else {
+            intervalMs = qMax(intervalMs, 8);
+        }
+    }
+#endif
     timer.setInterval(fixedMs > 0 ? fixedMs : intervalMs);
     // 排障专用：RHINE_DIAG_ANIMATE=1 时永不休眠。静止场景下引擎会主动休眠、
     // presented 不再增长，那时测出来的"帧率"是没有负载的数字，A/B 对比没有意义。
     static const bool forceAnimate = qEnvironmentVariableIsSet("RHINE_DIAG_ANIMATE");
+#if defined(Q_OS_ANDROID)
+    // 不能用 tick 开头的 hudTransition 快照：step() 里可能刚 publish 了一份新的 HUD
+    // 命令流，那一刻过渡窗口已过但纹理还没画。停掉 timer 会把这次呈现一起吞掉。
+    const bool hudStillPending = hudFramePending();
+#else
+    const bool hudStillPending = false;
+#endif
     if (!forceAnimate && now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
-        !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot" &&
-        m_temporalFramesRemaining == 0) {
+        !app->hud.animating(m_animationTime) && !m_discRotating && !hudTransition &&
+        // 用实时成员而非 tick 开头的局部快照：step() 里可能刚把 m_detailGrace 置真。
+        !m_detailGrace && !hudStillPending && m_frame["mode"] != "boot" && m_temporalFramesRemaining == 0 &&
+        !m_pacing.awaitingConsumption()) {
         timer.stop();
         m_sleeping = true;
         emit stateChanged();
@@ -440,7 +889,14 @@ void Engine::action(QString value) {
         return;
     }
     app->hud.action(value);
-    pollMedia();
+    // 连续拖动只更新页面位置，不反复同步查询后台播放服务。
+    const bool gesture =
+        app->hud.compactLayout() && (value.startsWith("mobile:lyrics-") || value == "mobile:archive-begin" ||
+                                     value == "mobile:archive-release");
+    if (!gesture) {
+        pollMedia();
+    }
+    // 所有 HUD 动作保留输入唤醒语义，横屏和移动布局都要退出场景休眠。
     wake();
 }
 /**
@@ -499,6 +955,38 @@ void Engine::toggleFullscreen() {
         m_window->showFullScreen();
     }
 }
+void Engine::gamepadPressed(const QString &button) {
+    if (button == "up") {
+        key("ArrowUp", false);
+    } else if (button == "down") {
+        key("ArrowDown", false);
+    } else if (button == "left") {
+        key("ArrowLeft", false);
+    } else if (button == "right") {
+        key("ArrowRight", false);
+    } else if (button == "a") {
+        key("Enter", false);
+    } else if (button == "b") {
+        key("Escape", false);
+    } else if (button == "select") {
+        action("menu");
+    } else if (button == "start") {
+        action("home");
+    } else if (button == "lb") {
+        action("column-prev");
+    } else if (button == "rb") {
+        action("column-next");
+    } else if (button == "lt") {
+        action("player:prev");
+    } else if (button == "rt") {
+        action("player:next");
+    } else if (button == "ls") {
+        action("player:toggle");
+    } else if (button == "rs") {
+        action("player:open");
+    }
+}
+
 bool Engine::keyEvent(int keyCode, int modifiers, QString text) {
     const bool accepted = keyEventImpl(keyCode, modifiers, text);
     // 探针：确认按键真的走进了 QML 输入层，以及有没有被消费掉（RHINE_KEY_PROBE=1）。
@@ -577,6 +1065,18 @@ void Engine::key(QString value, bool command) {
     app->hud.key(value, command);
     wake();
 }
+void Engine::settingEditText(QString text) {
+    app->hud.setSettingEditText(text);
+    wake();
+}
+void Engine::settingEditAccepted() {
+    app->hud.commitSettingEdit();
+    wake();
+}
+void Engine::settingEditCancel() {
+    app->hud.cancelSettingEdit();
+    wake();
+}
 void Engine::pointer(QString type, double x, double y) {
     if (type == "pointermove") {
         if (m_pointerX == x && m_pointerY == y && !m_pointerPending) {
@@ -605,12 +1105,13 @@ void Engine::wheel(double x, double y, double delta, bool pixels) {
     m_wheelY = y;
     m_wheelDelta += delta;
     if (pixels) {
-        m_wheelSteps += -delta / 15.;
+        m_wheelSteps += -delta / WHEEL_STEP_PIXELS;
         // 单独保留连续舞台位移，避免触控板不足一行的输入被整数行索引吞掉。
         m_wheelDistance += -delta / (m_height / 1080.);
     } else {
         // 列表按格立即推进一行，只有设置页和歌词需要平滑的连续距离。
         m_wheelSteps += delta < 0 ? 1 : -1;
+        // 这里的 15 是「一格滚轮 = 15 个步进单位」的距离换算，和上面的舞台像素除数无关。
         const auto distance = -delta / 15. * WHEEL_DISTANCE_PER_NOTCH;
         if (app->hud.reduced) {
             m_wheelDistance += distance;
@@ -624,7 +1125,7 @@ void Engine::wheel(double x, double y, double delta, bool pixels) {
 /**
  * 按顺序同步场景、音乐和 HUD 帧数据，保持绘制与命中区域一致。
  */
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) || defined(Q_OS_DARWIN)
 // RHINE_STEP_PROBE=1：拆开引擎每拍成本，并区分"干活"与"等待"。
 // 墙钟远大于线程 CPU 时间 => 这一拍是在阻塞（锁、GPU、内存回读），不是算得多。
 static double stepWallSum = 0, stepCpuSum = 0, stepAppSum = 0, stepRestSum = 0;
@@ -640,7 +1141,7 @@ static double threadCpuMs() {
 void Engine::step(double time) {
     if (!ready()) {
         return;
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) || defined(Q_OS_DARWIN)
     }
     const bool stepProbe = qEnvironmentVariableIntValue("RHINE_STEP_PROBE") == 1;
     const double stepT0 = stepProbe ? threadCpuMs() : 0.0;
@@ -657,16 +1158,55 @@ void Engine::step(double time) {
         scene.timings = {};
     }
     ++m_steps;
-    const bool reuse = m_sceneSleeping && !scene.changed();
+    if (scene.changed()) {
+        ++m_changedSteps;
+    }
+    // 页面过渡期间不能复用上一份 scene.frame：detail 过渡值逐帧变化，复用会让
+    // NativeHud::draw 拿到旧 frame、命令流冻结，hudUpdated 自然也不发。
+    const bool hudTransition = clock.elapsed() < m_hudTransitionUntilMs || m_detailGrace;
+    // 详情淡入期间绝不复用旧 scene.frame：复用会让 sample() 不被调用，
+    // m_detail / m_changed 都停住，正是那个自锁环的入口。
+    const bool reuse = m_sceneSleeping && !scene.changed() && !hudTransition;
     const auto object = app->step(time, m_width / (m_height / 1080), reuse);
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) || defined(Q_OS_DARWIN)
     const double stepAppMs = stepProbe ? double(stepAppTimer.nsecsElapsed()) / 1e6 : 0.0;
 #endif
     if (object.isEmpty()) {
         return;
     }
     const auto previousDiscAngle = m_frame.value("discAngle").toDouble();
+#ifdef Q_OS_DARWIN
+    const auto previousOrigin = m_frame.value("stats").toObject().value("coordinateOrigin");
+#endif
     m_frame = scene.frame;
+    const auto hudState = object["state"].toObject();
+    if (hudState["compactLayout"].toBool()) {
+        m_frame["mobileHud"] = true;
+        m_frame["songPanelTop"] = hudState["songPanelTop"];
+        m_frame["songPanelTransition"] = hudState["songPanelTransition"];
+    }
+    // 本帧刚切进 detail 时，tick() 开头看到的还是上一帧的 archive；不在这里重算，
+    // 帧末的休眠判定就会用 false 把 timer 停掉，再也没有下一帧。
+    updateDetailGrace(clock.elapsed());
+    // HUD 换页 / 详情过渡的判据：mode、viewer 或 detail 过渡值任一变化，就把接下来
+    // 一段窗口标成「HUD 连续刷新期」。detail 是 SceneMotion::smooth 的输出，逐帧在变；
+    // 少了这段标记，pacing Skip、引擎休眠和上面的 reuse 会把整段动画吃掉。
+    const auto pageMode = m_frame.value("mode").toString();
+    const bool pageViewer = m_frame.value("viewer").toBool();
+    const double pageDetail = m_frame.value("detail").toDouble();
+    const bool pageSwitch = pageMode != m_hudPageMode || pageViewer != m_hudPageViewer;
+    const bool detailMoving = std::abs(pageDetail - m_hudPageDetail) > 1e-4;
+    // 只看「值有没有变」是不够的：引擎休眠时 detail 会冻结在 0，永远不产生变化，
+    // 过渡窗口 600 ms 一过就又睡回去。改成「没收敛就一直续期」——
+    // frame["detail"] 是详情 HUD 的 alpha，<0.99 时整页还是透明的，必须继续出帧。
+    const bool detailPending = pageMode == "detail" && pageDetail < 0.99;
+    if (pageSwitch || detailMoving || detailPending) {
+        m_hudPageMode = pageMode;
+        m_hudPageViewer = pageViewer;
+        m_hudPageDetail = pageDetail;
+        // 动画本身约半秒；留一点余量让最后一帧稳定值也能被整窗画出来。
+        m_hudTransitionUntilMs = clock.elapsed() + 600;
+    }
     auto signature = m_frame;
     for (const auto &key : {"time", "stats", "labels", "boot", "pointerCursor", "jitter", "temporalReset"}) {
         signature.remove(key);
@@ -676,11 +1216,19 @@ void Engine::step(double time) {
     // 但时间性抗锯齿（FSR3/TAA）本身就是靠相位差累积历史，没有抖动它们只会反复混合
     // 同一张图、等于白做，所以这两者开启时无条件打开。AA 模式每帧读环境变量，切换免重启。
 #ifdef Q_OS_DARWIN
-    const bool metalFxTemporal = m_frame.value("mode") != "boot" && renderConfiguration.snapshot().temporal();
+    const auto renderSettings = renderConfiguration.snapshot();
+    const bool metalFxTemporal = m_frame.value("mode") != "boot" && renderSettings.temporal();
     if (!metalFxTemporal) {
         m_temporalFramesRemaining = 0;
     }
     const bool temporal = metalFxTemporal;
+    // 仅开 FG 插值时渲染器同样消费实例运动历史，原点变化必须一并重置。
+    const bool usesMotionHistory = temporal || renderSettings.frameGeneration();
+    if (usesMotionHistory && previousOrigin != m_frame.value("stats").toObject().value("coordinateOrigin")) {
+        // 原点平移会重新编码实例 ID；历史不能跨坐标系继续配对，MetalFX 也须一起重置。
+        m_jitterPhase = 0;
+        m_temporalResetPending = true;
+    }
 #else
     const auto aaMode = qEnvironmentVariable("RHINE_AA_MODE");
     // 空间 FSR 回退不累积历史，不能继续投影抖动，否则静止画面会逐帧闪动。
@@ -722,7 +1270,7 @@ void Engine::step(double time) {
     const auto cover = object["cover"].toString();
     const auto coverRevision = host.image(cover).cacheKey();
     const auto &player = app->music.player;
-    const auto identity = MusicPlayer::identity(player.current);
+    const auto identity = PlaybackQueue::identity(player.current);
     if (identity != m_discIdentity) {
         m_discIdentity = identity;
         m_discAngle = 0;
@@ -730,7 +1278,7 @@ void Engine::step(double time) {
     const bool wasRotating = m_discRotating;
     m_discRotating = m_visible && app->hud.discRotation && !app->hud.reduced && app->hud.modal.isEmpty() &&
                      m_frame.value("mode") == "detail" && !m_frame.value("viewer").toBool() &&
-                     current["kind"] == "song" && MusicPlayer::identity(current) == identity &&
+                     current["kind"] == "song" && PlaybackQueue::identity(current) == identity &&
                      !player.loading && !player.failed && player.state["playing"].toBool();
     if (wasRotating && m_discRotating) {
         // 20 秒一圈；接续可见视觉时钟，暂停或隐藏期间不补转。
@@ -739,9 +1287,12 @@ void Engine::step(double time) {
                                 2 * 3.14159265358979323846);
     }
     m_discTime = time;
-    const bool showDiscAngle = current["kind"] == "song" && MusicPlayer::identity(current) == identity;
+    const bool showDiscAngle = current["kind"] == "song" && PlaybackQueue::identity(current) == identity;
     m_frame["discAngle"] = showDiscAngle ? m_discAngle : 0;
     const bool discChanged = m_discRotating || previousDiscAngle != m_frame.value("discAngle").toDouble();
+    // 封面解码完成时命令流是逐字相同的（image 命令只带 key），单靠命令流比对
+    // 会以为"什么都没变"，HUD 上那张图就永远不刷新。这里单独记一笔。
+    [[maybe_unused]] const bool coverArrived = coverRevision != m_coverRevision;
     bool visualChanged = discChanged || !stable || current != m_current || cover != m_cover ||
                          coverRevision != m_coverRevision;
     if (!temporal) {
@@ -761,6 +1312,7 @@ void Engine::step(double time) {
     m_coverImage = host.image(m_cover);
     // 图形设备在后台可销毁；仅保存当前与可见归位卡片的图片，供恢复时重建纹理。
     const auto musicKey = current["key"].toString("empty");
+    submitTextureAdmission(musicKey);
     m_musicTextures[musicKey] = {current, m_coverImage};
     QSet<QString> retainedKeys{musicKey};
     for (const auto &key : m_frame.value("returningMusicKeys").toArray()) {
@@ -774,21 +1326,122 @@ void Engine::step(double time) {
     }
     for (auto it = m_musicTextures.begin(); it != m_musicTextures.end();) {
         if (!retainedKeys.contains(it.key())) {
+            // 条目没了，"已请求过封面"的记录也一并作废：它下次回到视野时值得再试一次。
+            m_coverRequests.remove(it.key());
             it = m_musicTextures.erase(it);
         } else {
             ++it;
         }
     }
+#if defined(Q_OS_ANDROID)
+    // 归档页会同时画 7 张唱片，但每个条目的封面图只在"它成为当前曲目"的那一帧取一次
+    // （上面的 `m_musicTextures[musicKey] = {current, m_coverImage}`），切歌瞬间
+    // host.image() 往往还没解码完，条目里就留下空 QImage，之后永不回填 —— 真机上表现
+    // 就是非当前唱片的盘面全是 placeholderCover（TEXDIAG: mt=7 adm=2 gated=5 discO=6
+    // covers=2，C++ 侧补建因为 `!it->cover.isNull()` 一个都过不去）。
+    //
+    // 不能只查 host.image()：缓存键是 loadCover 里加过 `param=NyN` 的改写 URL，拿
+    // item["cover"] 的原始地址去查永远 miss。所以要主动 loadCover，回调里再按返回的键取图。
+    // 512 像素够远看，一张约 1 MB，是当前曲目 1024 封面的四分之一。
+    // 放在 prune 之后：只给真正留下来的条目请求，别为马上就丢的 key 白下载。
+    for (auto it = m_musicTextures.begin(); it != m_musicTextures.end(); ++it) {
+        if (!it->cover.isNull() || it->item.isEmpty()) {
+            continue;
+        }
+        const auto url = it->item["cover"].toString();
+        if (url.isEmpty() || m_coverRequests.contains(it.key())) {
+            continue;
+        }
+        const auto key = it.key();
+        m_coverRequests.insert(key);
+        host.loadCover(
+            url,
+            [this, key](QString loaded) {
+                if (loaded.isEmpty()) {
+                    return;
+                }
+                // 回调是异步的：期间条目可能已被 prune 掉，用 find 而不是 operator[]，
+                // 否则会给一个已经没人要的 key 重新建条目。
+                auto entry = m_musicTextures.find(key);
+                if (entry != m_musicTextures.end() && entry->cover.isNull()) {
+                    entry->cover = host.image(loaded);
+                }
+            },
+            512);
+    }
+#endif
+    // 诊断：把「按曲目保留的 MusicTexture 数与其封面字节」交给渲染线程的内存探针打印。
+    {
+        auto &counters = RhineRender::engineMemoryCounters();
+        qint64 coverBytes = 0;
+        for (const auto &entry : m_musicTextures) {
+            coverBytes += entry.cover.sizeInBytes();
+        }
+        counters.musicTextures.store(int(m_musicTextures.size()), std::memory_order_relaxed);
+        counters.coverBytes.store(coverBytes, std::memory_order_relaxed);
+    }
+    // C03：准入状态只在这里写一次。synchronize() 拿到的就是这份快照，不再对每个条目
+    // 重新赋值 admitted——那会让整块 QHash 每帧 detach 一遍。
+    m_musicTextureSnapshot.clear();
+    for (auto it = m_musicTextures.cbegin(); it != m_musicTextures.cend(); ++it) {
+        auto entry = it.value();
+        entry.admitted = m_admission.isAdmitted(it.key());
+        m_musicTextureSnapshot.insert(it.key(), entry);
+    }
     auto commands = object["commands"].toArray();
-    if (commands != m_commands) {
+    bool hudChanged = true;
+#if defined(Q_OS_ANDROID)
+    // 只比对一次：hudDirtyRect 内部的「公共前缀 + 公共后缀」顺带就能判出「逐条相同」，
+    // 不必再跑一遍 `commands != m_commands` 的深比较——那是同一条命令流的第二遍遍历。
+    const double stageWidth = m_height > 0 ? m_width / (m_height / 1080) : 1920;
+    const auto dirty = RhineRender::hudDirtyRect(m_commands, commands, QSizeF(stageWidth, 1080));
+    hudChanged = !dirty.equal;
+    if (hudChanged) {
+        m_hudDirtyStage = dirty.rect;
+        m_hudDirtyFull = dirty.full;
+        // 详情淡入是整页过渡（真机实证：过渡后段命令流里唯一逐帧变化的是 alpha，
+        // 任何局部归因都可能漏掉 alpha 作用域内的其它像素）。过渡窗口与宽限期内
+        // 一律整窗重绘——淡入总共约一秒，全屏成本可接受，漏画则是「HUD 停在上一页」。
+        if (clock.elapsed() < m_hudTransitionUntilMs || m_detailGrace) {
+            m_hudDirtyFull = true;
+        }
+    }
+#else
+    hudChanged = commands != m_commands;
+    if (hudChanged) {
+        m_hudDirtyFull = true;
+    }
+#endif
+    if (pageSwitch) {
+        // 整页换内容：局部重绘会留下上一页的残影，强制整窗且必须发一次更新。
+        hudChanged = true;
+        m_hudDirtyFull = true;
+    }
+    const bool transitionNow = clock.elapsed() < m_hudTransitionUntilMs || m_detailGrace;
+    if (hudChanged) {
         m_commands = commands;
         ++m_hudUpdates;
-        emit hudUpdated();
+        m_hudRevision.fetch_add(1, std::memory_order_relaxed);
     }
+    // 过渡期即便命令流逐条相同也要发一次：Hud 的重绘只由这个信号驱动，
+    // 停在这里就是「进详情时 HUD 整层不显示」。
+    if (hudChanged || transitionNow) {
+        publishHudFrame();
+    }
+#if defined(Q_OS_ANDROID)
+    if (coverArrived) {
+        // 命令流没变但 HUD 上的像素变了：补一次整块重画。
+        m_hudDirtyFull = true;
+        publishHudFrame();
+    }
+#endif
     if (visualChanged) {
         ++m_sceneUpdates;
     }
-    notifySceneRenderers(visualChanged);
+    // HUD 命令流变化也必须促成一次呈现帧：RhiScene 把 sceneUpdated() 连到 update()，
+    // 只按 visualChanged（3D）通知时，3D 静止而 HUD 换页的那一帧窗口不会出帧，
+    // HudUploadTexture 的纹理就上传不了 —— 命中区已是新的、按钮能点，画面却是空的。
+    notifySceneRenderers(visualChanged || hudChanged || m_detailGrace);
     auto state = object["state"].toObject().toVariantMap();
     if (state != m_state) {
         m_state = state;
@@ -808,7 +1461,7 @@ void Engine::step(double time) {
         scene.timings.engineMs = frameTimer.nsecsElapsed() / 1000000.;
     }
     emit updated();
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) || defined(Q_OS_DARWIN)
     if (stepProbe) {
         const double wall = double(clock.nsecsElapsed() - stepWall0) / 1e6;
         const double cpu = threadCpuMs() - stepT0;
@@ -944,5 +1597,15 @@ void Engine::decryptLocalFolder(QUrl url) {
     }
     app->hud.openModal("downloads");
     app->music.downloads.unlockDirectories({url.toLocalFile()});
+    wake();
+}
+
+void Engine::importPluginFolder(QUrl url) {
+    if (!url.isLocalFile()) {
+        return;
+    }
+    const auto error = host.importPlugin(url.toLocalFile());
+    app->hud.pluginManagerMessage = error.isEmpty() ? QStringLiteral("插件已导入") : error;
+    host.invalidate();
     wake();
 }

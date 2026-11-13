@@ -4,6 +4,7 @@
 #include "NativeHud.h"
 #include "MusicData.h"
 #include "MusicDiscover.h"
+#include "ProviderRegistry.h"
 #include <QJsonDocument>
 #include <QPointer>
 #include <QUrl>
@@ -36,12 +37,18 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
     reduced = host->preference("motion") == "reduced";
     startupAnimation = host->preference("startup-animation") == "on";
 #ifdef Q_OS_DARWIN
-    // Apple 平台的呈现节奏由系统合成器固定，设置页不提供该开关，状态恒为关闭。
-    vsync = false;
+    // 设置页仍隐藏同步开关；状态与实际呈现及诊断覆盖保持一致。
+    vsync = RhineFg::metalVSyncEnabled();
+    // macOS 只有 Metal 后端
+    if (host->preference("graphics-backend") != "metal") {
+        host->setPreference("graphics-backend", "metal");
+    }
 #else
     vsync = host->preference("vsync") != "off";
 #endif
     discRotation = host->preference("disc-rotation") == "on";
+    skipDetailOnSwitch = host->preference("skip-detail-on-switch") == "on";
+    music->skipDetailOnSwitch = skipDetailOnSwitch;
     bool hasMaskStrength = false;
     const auto savedMaskStrength = host->preference("archive-mask-strength").toInt(&hasMaskStrength);
     if (hasMaskStrength) {
@@ -51,6 +58,8 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
         m_music->status = "发现新版本 " + m_host->updater.latestVersion() + "，可在设置中前往发布页面更新";
     });
     connect(music, &MusicLibrary::invalidated, this, &NativeHud::finishPage);
+    connect(music, &MusicLibrary::invalidated, this, &NativeHud::ensureSearchFilled);
+    connect(music, &MusicLibrary::invalidated, this, &NativeHud::ensureSavedFilled);
     connect(music, &MusicLibrary::invalidated, this,
             [this] { QTimer::singleShot(0, this, &NativeHud::continueSort); });
 }
@@ -61,8 +70,14 @@ void NativeHud::openModal(QString kind) {
         QStringList{"login", "quality", "playlist-picker", "playlist-form"}.contains(kind)) {
         return;
     }
+    if (m_music->isSiren() && kind == "login") {
+        return;
+    }
     if (kind == "discover" && m_music->isLocal()) {
         kind = "local";
+    }
+    if (kind == "discover" && m_music->isSiren()) {
+        return;
     }
     ++m_searchGeneration;
     if (m_scene.pointer) {
@@ -70,44 +85,90 @@ void NativeHud::openModal(QString kind) {
         m_scene.pointer("pointerleave", 0, 0, 0);
     }
     modal = kind;
+    if (kind == "player") {
+        // 仅唤起时定位当前音轨；后续绘制不抢回用户手动滚动的位置。
+        queueOffset = std::max(0, m_music->player.queue.indexOf(m_music->player.current));
+    }
     closing = false;
+    editingSettingId.clear();
+    editingSettingText.clear();
+    editingSettingRect = QRectF();
     // 换页时收起所有下拉块，避免展开状态跨页面残留。
     expandedPreference.clear();
+    cacheMessage.clear();
     motion.set(true, lastTime, reduced);
     query.clear();
     listOffset = 0;
+    resetResultViews();
     settingsScroll = 0;
+    discoverScroll = 0;
     activeGroup.clear();
     artistTab = "songs";
     categoryPicker = false;
     categoryPage = 0;
     if (kind == "saved") {
         musicCollection = std::max(1, m_music->selectedLane);
-        if (m_music->provider == "kugou" && musicCollection == 4) {
-            musicCollection = 2;
+        if (!m_music->laneVisible(musicCollection)) {
+            musicCollection = 1;
+            for (int lane = 1; lane < m_music->columns.size(); ++lane) {
+                if (m_music->laneVisible(lane)) {
+                    musicCollection = lane;
+                    break;
+                }
+            }
         }
         if (m_music->lists[musicCollection].isEmpty()) {
             m_music->loadMoreSource(musicCollection);
         }
+        // 首屏不足一屏时继续补页，滚动列表不再依赖翻页按钮。
+        ensureSavedFilled();
     }
     if (kind == "search") {
         query = m_music->keyword;
     }
+    if (kind == "settings") {
+        // 首次绘制前也先测量内容高度，会话恢复才能按真实上限钳制滚动位置。
+        refreshSettingsLayout();
+        refreshStorageUsage();
+    }
+    if (kind == "desktop-lyrics") {
+        // 进入页面时重新读取偏好，页面内的修改随后走独立动作。
+        desktopLyricsAppearanceLoaded = false;
+        desktopLyricsScroll = 0;
+        refreshDesktopLyricsLayout();
+    }
 }
 
 void NativeHud::closeModal() {
+    if (shortcuts && modal == "shortcuts") {
+        shortcuts->cancelRecording();
+    }
     m_sortRequest.reset();
     ++m_searchGeneration;
     if (modal == "login") {
         m_music->cancelLogin();
     }
+    editingSettingId.clear();
+    editingSettingText.clear();
+    editingSettingRect = QRectF();
     closing = true;
-    motion.set(false, lastTime, reduced);
+    const bool directNavigation =
+        m_responsive.compact() && QStringList{"search", "discover", "settings", "saved"}.contains(modal);
+    motion.set(false, lastTime, reduced || directNavigation);
 }
 
 void NativeHud::setQuery(QString value) {
+    // ！？ 325 ？！
+    if (!m_responsive.compact() && value == QStringLiteral("325")) {
+        m_secretKeys.clear();
+        ++m_searchGeneration;
+        query.clear();
+        openHiddenVideo();
+        return;
+    }
     query = value;
     listOffset = 0;
+    resetResultViews();
     activeGroup.clear();
     const auto token = ++m_searchGeneration;
     if (modal == "search") {
@@ -117,12 +178,17 @@ void NativeHud::setQuery(QString value) {
                 return;
             }
             owner->m_music->search(value);
-            const auto parsed = owner->m_host->fromLink(value);
-            if (!parsed.isEmpty() && parsed.section(':', 0, 0) == owner->m_music->provider) {
+            if (ProviderRegistry::instance().capability(owner->m_music->provider, "resolveLink", false) &&
+                value.contains("://")) {
                 owner->closeModal();
             }
         });
     }
+}
+
+// ！？ 325 ？！
+void NativeHud::openHiddenVideo() {
+    m_host->open(QStringLiteral("https://www.bilibili.com/video/BV1GkosY6EGp/"));
 }
 
 void NativeHud::form(QJsonObject fields) {
@@ -148,11 +214,11 @@ QVector<NativeHud::Row> NativeHud::rows(int lane) {
         return {};
     }
     const auto filter = modal == "saved" ? query.toLower() : QString();
-    const auto key =
-        QString::fromUtf8(QJsonDocument(QJsonArray{lane, double(m_music->revision),
-                                                   m_music->lists[lane].size(), filter, groupBy, activeGroup})
-                              .toJson(QJsonDocument::Compact));
-    if (key == m_rowsKey) {
+    const auto key = QString::fromUtf8(
+        QJsonDocument(QJsonArray{lane, m_music->provider, double(m_music->accountGeneration()),
+                                 m_music->lists[lane].size(), filter, groupBy, activeGroup})
+            .toJson(QJsonDocument::Compact));
+    if (key == m_rowsKey && m_rowsSource == m_music->lists[lane]) {
         return m_rows;
     }
     QVector<Row> values;
@@ -228,6 +294,7 @@ QVector<NativeHud::Row> NativeHud::rows(int lane) {
         }
     }
     m_rowsKey = key;
+    m_rowsSource = m_music->lists[lane];
     m_rows = values;
     return values;
 }
@@ -270,11 +337,13 @@ void NativeHud::playerAction(const QStringList &parts) {
     const auto name = parts.value(1);
     const auto value = parts.value(2).toDouble();
     const auto index = int(value);
-    if (name == "lyrics") {
+    if (name == "mv" && PlatformFeatures::MusicVideo) {
+        emit mvRequested();
+    } else if (name == "lyrics" || name == "detail") {
         if (!player.current.isEmpty()) {
             modal.clear();
             closing = false;
-            lyricsMode = true;
+            lyricsMode = name == "lyrics";
             m_lyricsBrowse.reset();
             music.followPlayback(player.current);
             m_scene.mode("detail");
@@ -334,10 +403,16 @@ void NativeHud::playerAction(const QStringList &parts) {
     } else if (name == "volume" || name == "volume-fraction") {
         player.volume(name == "volume" ? value / 10 : value);
     } else if (name == "mode") {
-        player.setMode(cycle({"off", "all", "one", "shuffle"}, player.mode));
+        const auto requested = parts.value(2);
+        const QStringList modes{"off", "all", "one", "shuffle"};
+        if (requested.isEmpty()) {
+            player.setMode(cycle(modes, player.mode));
+        } else if (modes.contains(requested)) {
+            player.setMode(requested);
+        }
     } else if (name == "queue") {
         if (index >= 0 && index < player.queue.size()) {
-            player.play(player.queue.at(index).toObject(), std::nullopt, index);
+            player.play(player.queue.at(index), std::nullopt, index);
         }
     } else if (name == "remove") {
         player.remove(index);
@@ -350,6 +425,136 @@ void NativeHud::playerAction(const QStringList &parts) {
 
 /** 动作字符串保持原有输入协议，控制器直接更新原生音乐状态和场景。 */
 void NativeHud::action(QString value) {
+    if (value.startsWith("download:")) {
+        downloadAction(value.mid(9));
+        return;
+    }
+    if (m_responsive.compact() && value.startsWith("mobile:play-collection:")) {
+        const auto json =
+            QUrl::fromPercentEncoding(value.mid(QString("mobile:play-collection:").size()).toUtf8());
+        m_music->playCollection(QJsonDocument::fromJson(json.toUtf8()).object());
+        return;
+    }
+    if (m_responsive.compact() && value.startsWith("mobile:play-discover:")) {
+        const int index = value.mid(QString("mobile:play-discover:").size()).toInt();
+        if (index >= 0 && index < m_music->discover->items.size()) {
+            m_music->playCollection(m_music->discover->items[index].toObject());
+        }
+        return;
+    }
+    if (m_responsive.compact() && value.startsWith("mobile:lyrics-drag:")) {
+        m_mobileTransition.drag(value.mid(19).toDouble());
+        return;
+    }
+    if (m_responsive.compact() && value == "mobile:lyrics-release") {
+        if (m_mobileTransition.release()) {
+            playerAction({"player", "lyrics-close"});
+        }
+        return;
+    }
+    if (m_responsive.compact() && value.startsWith("mobile:comments-drag:")) {
+        m_mobileTransition.drag(value.mid(21).toDouble());
+        return;
+    }
+    if (m_responsive.compact() && value == "mobile:comments-release") {
+        if (m_mobileTransition.release()) {
+            commentsMode = false;
+        }
+        return;
+    }
+    if (value == "music:comments") {
+        if (!m_music->commentsAvailable()) {
+            return;
+        }
+        m_responsive.handleAction(value);
+        commentsTrackKey = CommentsController::trackKey(m_music->current);
+        commentsScroll = 0;
+        commentsContentBottom = 0;
+        if (!m_responsive.compact() && tab != "comments") {
+            commentsReturnTab = tab;
+            tab = "comments";
+        }
+        commentsMode = true;
+        m_music->comments.load(m_music->current);
+        return;
+    }
+    if (value == "music:comments-close") {
+        commentsMode = false;
+        if (!m_responsive.compact()) {
+            tab = commentsReturnTab.isEmpty() || commentsReturnTab == "comments" ? "overview"
+                                                                                 : commentsReturnTab;
+        }
+        commentsScroll = 0;
+        return;
+    }
+    if (m_responsive.compact() && value == "mobile:play-archive") {
+        m_music->playDirectory(true);
+        return;
+    }
+
+    if (m_responsive.compact() && value.startsWith("mobile:source:")) {
+        bool valid = false;
+        const int lane = value.mid(14).toInt(&valid);
+        if (valid && m_music->sourceOrder().contains(lane)) {
+            m_music->showSource(lane);
+        }
+        return;
+    }
+    if (m_responsive.handleAction(value)) {
+        return;
+    }
+    if (m_responsive.compact() && (value == "mobile:history" || value == "mobile:artists")) {
+        openModal("discover");
+        action(value == "mobile:history" ? "discover:tab:history" : "discover:tab:artists");
+        return;
+    }
+    if (m_responsive.compact() && value == "mobile:play-liked") {
+        m_music->showSource(1);
+        m_music->playDirectory(true);
+        return;
+    }
+    if (m_responsive.compact() && value == "mobile:search-submit") {
+        setQuery(query);
+        return;
+    }
+    if (!editingSettingId.isEmpty() && !value.startsWith("setting-edit:")) {
+        cancelSettingEdit();
+    }
+    if (value.startsWith("setting-edit:")) {
+        beginSettingEdit(value.mid(13));
+        return;
+    }
+    if (value == "menu") {
+        if (closing) {
+            return;
+        }
+        if (modal.isEmpty()) {
+            openModal("settings");
+        } else {
+            closeModal();
+        }
+        return;
+    }
+    if (value == "home") {
+        lyricsMode = false;
+        commentsMode = false;
+        if (!modal.isEmpty()) {
+            closeModal();
+        }
+        if (m_scene.viewer) {
+            m_scene.viewer("close");
+        }
+        auto &music = *m_music;
+        while (music.directory) {
+            const auto current = music.directory;
+            music.leaveDirectory();
+            if (music.directory == current) {
+                break;
+            }
+        }
+        m_scene.mode("archive");
+        return;
+    }
     if ((!PlatformFeatures::LocalMusic && (value.startsWith("local:") || value == "provider:local")) ||
         (!PlatformFeatures::OfficialPlayback &&
          (value == "music:official" || value == "player:official" || value == "music:activate")) ||
@@ -359,14 +564,33 @@ void NativeHud::action(QString value) {
     if (modal == "settings" && !closing &&
         (value == "settings:scroll-up" || value == "settings:scroll-down")) {
         const auto movement = value == "settings:scroll-down" ? 120. : -120.;
-        settingsScroll = std::clamp(settingsScroll + movement, 0., settingsScrollMaximum());
+        settingsScroll =
+            HudScroll::clampOffset(settingsScroll + movement, settingsContentBottom - SettingsViewportTop,
+                                   SettingsViewportBottom - SettingsViewportTop);
+        return;
+    }
+    if (value == "settings:restore-defaults") {
+        restoreSettingsDefaults();
+        return;
+    }
+    if (value.startsWith("desktop-lyrics:")) {
+        applyDesktopLyricsAction(value);
+        return;
+    }
+    if (value.startsWith("shortcuts:")) {
+        applyShortcutAction(value);
+        return;
+    }
+    if (value.startsWith("setting:")) {
+        // Schema 控件使用 setting:<id>:<value> 写入；旧版动作字符串仍由各自分支处理。
+        const auto rest = value.mid(8);
+        const auto colon = rest.indexOf(':');
+        if (colon > 0) {
+            applySettingValue(rest.left(colon), rest.mid(colon + 1));
+        }
         return;
     }
 
-    if (value.startsWith("download:")) {
-        downloadAction(value.mid(9));
-        return;
-    }
     if (value.startsWith("update:")) {
         auto &updater = m_host->updater;
         if (value == "update:check") {
@@ -379,6 +603,52 @@ void NativeHud::action(QString value) {
             const bool enabled = m_host->preference("auto-update") != "off";
             m_host->setPreference("auto-update", enabled ? "off" : "on");
         }
+        return;
+    }
+    if (value == "history:clear") {
+        m_music->clearHistory([owner = QPointer(this)](QJsonArray items) {
+            if (!owner) {
+                return;
+            }
+            bool success = items.size() == 2;
+            for (const auto &item : items) {
+                success &= item.toObject()["status"] == "cleared";
+            }
+            owner->cacheMessage = success ? QStringLiteral("历史已清除") : QStringLiteral("历史清理未完成");
+            owner->m_host->invalidate();
+        });
+        return;
+    }
+    if (value == "cache:clear") {
+        cacheMessage = QStringLiteral("正在清理…");
+        m_music->clearCaches([owner = QPointer(this)](QJsonArray items) {
+            if (!owner) {
+                return;
+            }
+            QStringList errors;
+            bool deferred = false;
+            qint64 releasedBytes = 0;
+            for (const auto &item : items) {
+                const auto result = item.toObject();
+                deferred |= result["status"] == "deferred";
+                releasedBytes += result["removedFileBytes"].toInteger() +
+                                 result["releasedFileBytes"].toInteger();
+                if (result["status"] == "failed" || result["status"] == "unavailable") {
+                    errors.append(result["error"].toString(result["category"].toString()));
+                }
+            }
+            if (!errors.isEmpty()) {
+                owner->cacheMessage = QStringLiteral("清理未完成：") + errors.join(QStringLiteral("、"));
+            } else if (deferred) {
+                owner->cacheMessage = QStringLiteral("已清理，重启后清渲染缓存");
+            } else if (releasedBytes > 0) {
+                owner->cacheMessage = QStringLiteral("已释放 %1 MiB").arg(releasedBytes / 1048576., 0, 'f', 1);
+            } else {
+                owner->cacheMessage = QStringLiteral("已清除");
+            }
+            owner->m_host->invalidate();
+            owner->refreshStorageUsage();
+        });
         return;
     }
     auto &music = *m_music;
@@ -397,25 +667,158 @@ void NativeHud::action(QString value) {
         return;
     }
     if (value.startsWith("tab:")) {
+        const auto next = value.mid(4);
+        if (next == "comments") {
+            if (!music.commentsAvailable()) {
+                return;
+            }
+            if (tab != "comments") {
+                commentsReturnTab = tab;
+            }
+            trackOffset = 0;
+            bodyOffset = 0;
+            tab = "comments";
+            commentsTrackKey = CommentsController::trackKey(music.current);
+            commentsScroll = 0;
+            commentsContentBottom = 0;
+            commentsMode = true;
+            music.comments.load(music.current);
+            return;
+        }
+        commentsMode = false;
         trackOffset = 0;
         bodyOffset = 0;
-        tab = value.mid(4);
+        tab = next;
         if (music.current.value("kind") == "song" && tab != "overview") {
             music.sameAlbum();
         }
+        return;
+    }
+    if (value == "comments:close") {
+        commentsMode = false;
+        tab = commentsReturnTab.isEmpty() || commentsReturnTab == "comments" ? "overview" : commentsReturnTab;
+        commentsScroll = 0;
+        return;
+    }
+    if (value.startsWith("comments:sort:")) {
+        music.comments.setSort(value.mid(14));
+        commentsScroll = 0;
+        return;
+    }
+    if (value == "comments:refresh" || value == "comments:retry") {
+        music.comments.refresh();
+        commentsScroll = 0;
+        return;
+    }
+    if (value == "comments:load-more") {
+        music.comments.loadMore();
+        return;
+    }
+    if (value.startsWith("comments:replies-more:")) {
+        music.comments.loadMoreReplies(value.mid(22));
+        return;
+    }
+    if (value.startsWith("comments:replies:")) {
+        music.comments.toggleReplies(value.mid(17));
+        return;
+    }
+    if (value.startsWith("comments:expand:")) {
+        music.comments.toggleExpanded(value.mid(16));
         return;
     }
     if (value == "provider") {
         openModal("provider");
         return;
     }
+    if (value == "plugins") {
+        pluginManagerMessage.clear();
+        openModal("plugins");
+        // 市场索引可能在应用运行期间更新，进入面板时总是重新读取，避免显示过期版本。
+        m_host->refreshPluginMarketplace();
+        return;
+    }
+    if (value == "plugin:refresh") {
+        m_host->refreshPluginMarketplace();
+        return;
+    }
+    if (value == "plugin:import") {
+        emit pluginImportRequested();
+        return;
+    }
+    if (value.startsWith("plugin:market:")) {
+        const auto error = m_host->installMarketplacePlugin(value.mid(QString("plugin:market:").size()));
+        pluginManagerMessage = error;
+        if (error.isEmpty()) {
+            openModal("plugins");
+        }
+        m_host->invalidate();
+        return;
+    }
+    if (value.startsWith("plugin:toggle:")) {
+        const auto id = value.mid(QString("plugin:toggle:").size());
+        const auto enabled = m_host->pluginEnabled(id);
+        if (enabled && m_music && id == m_music->provider) {
+            pluginManagerMessage = QStringLiteral("请先切换到其他来源后再禁用插件");
+            m_host->invalidate();
+            return;
+        }
+        m_host->setPluginEnabled(id, !enabled);
+        pluginManagerMessage = enabled ? QStringLiteral("已禁用插件") : QStringLiteral("已启用插件");
+        m_host->invalidate();
+        return;
+    }
+    if (value.startsWith("plugin:detail:")) {
+        pluginDetailId = value.mid(QString("plugin:detail:").size());
+        pluginManagerMessage.clear();
+        openModal("plugin-detail");
+        return;
+    }
+    if (value.startsWith("plugin:rollback:")) {
+        const auto error = m_host->rollbackPlugin(value.mid(QString("plugin:rollback:").size()));
+        pluginManagerMessage = error.isEmpty() ? QStringLiteral("插件已回滚") : error;
+        m_host->invalidate();
+        return;
+    }
+    if (value.startsWith("plugin:uninstall:")) {
+        const auto id = value.mid(QString("plugin:uninstall:").size());
+        if (m_music && id == m_music->provider) {
+            pluginManagerMessage = QStringLiteral("请先切换到其他来源后再卸载插件");
+            m_host->invalidate();
+            return;
+        }
+        const auto detail = m_host->pluginDetail(id);
+        if (!detail["userInstalled"].toBool()) {
+            pluginManagerMessage = QStringLiteral("内置插件不能卸载");
+            m_host->invalidate();
+            return;
+        }
+        confirmTitle = QStringLiteral("卸载插件：") + detail["display"].toObject()["name"].toString(id);
+        confirmMessage = QStringLiteral("只删除应用数据目录中的插件文件，不删除账号数据。");
+        confirmLabel = QStringLiteral("确认卸载");
+        const QPointer<Host> host(m_host);
+        const QPointer<NativeHud> owner(this);
+        m_confirm = [host, owner, id] {
+            if (!host || !owner) {
+                return;
+            }
+            const auto error = host->uninstallPlugin(id);
+            owner->pluginManagerMessage = error.isEmpty() ? QStringLiteral("插件已卸载") : error;
+            host->invalidate();
+            owner->openModal("plugins");
+        };
+        openModal("confirm");
+        return;
+    }
     if (value.startsWith("provider:")) {
         const auto provider = value.mid(9);
         if (music.provider != provider) {
+            commentsMode = false;
+            music.comments.clear();
             ++m_searchGeneration;
             activeGroup.clear();
             query.clear();
             listOffset = 0;
+            resetResultViews();
             trackOffset = 0;
             music.switchProvider(provider);
         }
@@ -445,8 +848,6 @@ void NativeHud::action(QString value) {
                 const QPointer<MusicLibrary> owner(&music);
                 // 回调跨越确认面板的生命周期，必须复制字符串，不能捕获临时 JSON 字段引用。
                 const auto path = roots.at(index).toObject()["path"].toString();
-                confirmBody = QStringLiteral("只移除本地索引，磁盘音乐文件保持原样。");
-                confirmAccept = QStringLiteral("确认删除");
                 m_confirm = [owner, path] {
                     if (!owner || !owner->isLocal()) {
                         return;
@@ -459,6 +860,8 @@ void NativeHud::action(QString value) {
                         }
                     }
                 };
+                confirmMessage.clear();
+                confirmLabel.clear();
                 openModal("confirm");
             }
         } else if (name == "browse") {
@@ -478,7 +881,7 @@ void NativeHud::action(QString value) {
         auto &discover = *music.discover;
         const auto name = parts.value(1);
         if (name == "tab") {
-            listOffset = 0;
+            discoverScroll = 0;
             categoryPicker = false;
             categoryPage = 0;
             discover.load(parts.value(2));
@@ -492,8 +895,8 @@ void NativeHud::action(QString value) {
             if (music.openDaily()) {
                 closeModal();
             }
-        } else if (name == "area" && music.provider == "qq") {
-            listOffset = 0;
+        } else if (name == "area") {
+            discoverScroll = 0;
             discover.newSongArea = parts.value(2);
             discover.load("new-songs");
         } else if (name == "categories") {
@@ -503,20 +906,23 @@ void NativeHud::action(QString value) {
                 discover.loadCategories();
             }
         } else if (name == "category-page") {
-            const auto pages =
-                std::max(1, (int(discover.categories.size()) + CategoryPageSize - 1) / CategoryPageSize);
+            const bool hasAllCategory = std::any_of(
+                discover.categories.begin(), discover.categories.end(), [](const QJsonValue &value) {
+                    const auto category = value.toObject();
+                    return category["id"].toString() == "全部" || category["name"].toString() == "全部";
+                });
+            const int allCategory = discover.categories.isEmpty() || hasAllCategory ? 1 : 0;
+            const auto pages = std::max(
+                1, (int(discover.categories.size()) + allCategory + CategoryPageSize - 1) / CategoryPageSize);
             const auto step = parts.value(2) == "prev" ? -1 : 1;
             categoryPage = std::clamp(categoryPage + step, 0, pages - 1);
         } else if (name == "category") {
-            listOffset = 0;
+            discoverScroll = 0;
             categoryPicker = false;
             discover.category = decode(parts.value(2));
             discover.load("categories");
         } else if (name == "more") {
             discover.load(discover.tab, true);
-        } else if (name == "prev" || name == "next") {
-            const auto maximum = std::max(0, int(discover.items.size()) - 6);
-            listOffset = std::clamp(listOffset + (name == "prev" ? -6 : 6), 0, maximum);
         }
         return;
     }
@@ -543,6 +949,7 @@ void NativeHud::action(QString value) {
     }
     if (value == "back") {
         lyricsMode = false;
+        commentsMode = false;
         if (music.directory) {
             if (frame["mode"] == "detail") {
                 music.returnToDirectory();
@@ -575,6 +982,9 @@ void NativeHud::action(QString value) {
         return;
     }
     if (value == "discover") {
+        if (music.isSiren()) {
+            return;
+        }
         openModal("discover");
         if (!music.isLocal()) {
             music.discover->load();
@@ -636,22 +1046,32 @@ void NativeHud::action(QString value) {
     } else if (value == "detail-autoplay") {
         const bool enabled = m_host->preference("detail-autoplay") == "on";
         m_host->setPreference("detail-autoplay", enabled ? "off" : "on");
+    } else if (value == "skip-detail-on-switch") {
+        const bool enabled = m_host->preference("skip-detail-on-switch") == "on";
+        applySettingValue("skip-detail-on-switch", enabled ? "off" : "on");
     } else if (value == "close-behavior") {
         // 关闭行为在点击窗口关闭按钮时读取
         const bool toTray = m_host->preference("close-behavior") == "tray";
         m_host->setPreference("close-behavior", toTray ? "quit" : "tray");
+    } else if (value == "debug-mode") {
+        const bool enabled = m_host->preference("debug-mode") == "on";
+        m_host->setPreference("debug-mode", enabled ? "off" : "on");
     } else if (value == "graphics-backend") {
         // 后端切换需要重启生效：仅写入配置，由下次启动的 selectGraphicsBackend 应用。
-        // 顺序：默认（自动探测）→ Vulkan → OpenGL → 默认
+        // 顺序：默认（自动探测）→ Vulkan → D3D12 → OpenGL → 默认。
         const auto current = m_host->preference("graphics-backend");
         QString next;
         if (current.isEmpty()) {
             next = QStringLiteral("vulkan");
         } else if (current == "vulkan") {
-            next = QStringLiteral("opengl");
 #if defined(Q_OS_WIN) && RHINE_ENABLE_D3D12_BACKEND
-        } else if (current == "opengl") {
             next = QStringLiteral("d3d12");
+#else
+            next = QStringLiteral("opengl");
+#endif
+#if defined(Q_OS_WIN) && RHINE_ENABLE_D3D12_BACKEND
+        } else if (current == "d3d12") {
+            next = QStringLiteral("opengl");
 #endif
         }
         m_host->setPreference("graphics-backend", next);
@@ -676,7 +1096,8 @@ void NativeHud::action(QString value) {
         // 列表高度参与内容总高度，所以展开后立即重新夹紧滚动位置，避免停在超出末尾的位置。
         const auto key = value.mid(7);
         expandedPreference = expandedPreference == key ? QString() : key;
-        settingsScroll = std::clamp(settingsScroll, 0., std::max(0., settingsScrollMaximum()));
+        // 展开/收起会改变测量高度，立即重算上限再钳制滚动位置。
+        refreshSettingsLayout();
     } else if (value.startsWith("fsr-quality:")) {
         // FSR 超分档位：渲染器每帧读取，下一帧生效（内部尺寸变化会触发渲染目标重建）。
         const auto quality = value.mid(12);
@@ -738,20 +1159,31 @@ void NativeHud::action(QString value) {
             qputenv("RHINE_RENDER_SCALE", QByteArray::number(clamped));
         }
     } else if (value == "fg") {
-#ifdef Q_OS_LINUX
+        // #ifdef Q_OS_LINUX
         // 帧生成与抗锯齿模式互不影响。**需要重启才生效**：呈现层是否接管窗口在启动时
         // 按 RHINE_FG 决定（fg=off 走 Qt 默认路径，内容帧实测高 35%）。这里仍然写入
         // 环境变量，保证设置页显示与持久化偏好一致。转换规则与 Host::setPreference
         // 共用同一个函数，免得两处对"什么才算 on"产生分歧。
-#else
+        // #else
         // 帧生成与抗锯齿模式互不影响；呈现层每帧读取 RHINE_FG，切换后下一帧生效，
         // 所以这个开关是设置页里唯一不需要重启的偏好。转换规则与 Host::setPreference
         // 共用同一个函数，免得两处对"什么才算 on"产生分歧。
+        // #endif
+        // FSR 插帧开关已从设置界面下线：设置页不再产生 "fg" 动作，旧版本残留的点击或
+        // 外部动作一律忽略（不写偏好、不改 RHINE_FG），避免"界面里没有开关、进程里却开着插帧"。
+        // 恢复开关时把下面四行取消注释即可。
+        // const auto enabled = m_host->preference("fg") == "on";
+        // const auto next = enabled ? QStringLiteral("off") : QStringLiteral("on");
+        // m_host->setPreference("fg", next);
+        // RhineFg::applyInterpolationPreference(next);
+#ifdef Q_OS_DARWIN
+        // Apple 的 MetalFX 补帧与抗锯齿模式互不影响；写偏好后 Host 同步 RHINE_FG，
+        // 渲染线程下一次快照生效。显式环境变量排障时按真正生效的状态取反。
+        const QByteArray environment = qgetenv("RHINE_FG");
+        const bool enabled =
+            environment.isEmpty() ? m_host->preference("fg") == "on" : RhineFg::parseBool(environment, false);
+        m_host->setPreference("fg", enabled ? "off" : "on");
 #endif
-        const auto enabled = m_host->preference("fg") == "on";
-        const auto next = enabled ? QStringLiteral("off") : QStringLiteral("on");
-        m_host->setPreference("fg", next);
-        RhineFg::applyInterpolationPreference(next);
     } else if (value == "single-play-mode") {
         const bool append = m_host->preference("single-play-mode") == "append";
         m_host->setPreference("single-play-mode", append ? "replace" : "append");
@@ -760,7 +1192,7 @@ void NativeHud::action(QString value) {
         m_host->setPreference("startup-animation", startupAnimation ? "on" : "off");
     } else if (value == "vsync") {
 #ifdef Q_OS_DARWIN
-        // Apple 平台固定关闭垂直同步，设置页不显示该行；外部动作也不改变任何状态。
+        // Apple 平台沿用启动同步配置，设置页不显示该行；外部动作也不改变任何状态。
 #else
         vsync = !vsync;
         m_host->setPreference("vsync", vsync ? "on" : "off");
@@ -773,12 +1205,35 @@ void NativeHud::action(QString value) {
 }
 
 void NativeHud::key(QString value, bool command) {
+    // ！？ 325 ？！
+    if (!m_responsive.compact() && !command && value.size() == 1 && value.at(0).isDigit()) {
+        m_secretKeys.append(value);
+        if (m_secretKeys.size() > 3) {
+            m_secretKeys.remove(0, m_secretKeys.size() - 3);
+        }
+        if (m_secretKeys == QStringLiteral("325")) {
+            m_secretKeys.clear();
+            openHiddenVideo();
+            return;
+        }
+    } else {
+        m_secretKeys.clear();
+    }
     if (frame.isEmpty()) {
         return;
     }
     if (modal == "settings" && !closing && (value == "ArrowDown" || value == "ArrowUp")) {
-        const auto movement = value == "ArrowDown" ? 50. : -50.;
-        settingsScroll = std::clamp(settingsScroll + movement, 0., settingsScrollMaximum());
+        const auto movement = value == "ArrowDown" ? 66. : -66.;
+        settingsScroll =
+            HudScroll::clampOffset(settingsScroll + movement, settingsContentBottom - SettingsViewportTop,
+                                   SettingsViewportBottom - SettingsViewportTop);
+        return;
+    }
+    if (modal == "desktop-lyrics" && !closing && (value == "ArrowDown" || value == "ArrowUp")) {
+        const auto movement = value == "ArrowDown" ? 66. : -66.;
+        desktopLyricsScroll = HudScroll::clampOffset(desktopLyricsScroll + movement,
+                                                     desktopLyricsContentBottom - DesktopLyricsViewportTop,
+                                                     DesktopLyricsViewportBottom - DesktopLyricsViewportTop);
         return;
     }
     if (value == "Enter" && command) {
@@ -790,7 +1245,15 @@ void NativeHud::key(QString value, bool command) {
         return;
     }
     if (value == "Escape") {
-        action(modal.isEmpty() ? "back" : "close-modal");
+        if (modal == "shortcuts") {
+            action("shortcuts:back");
+        } else if (modal == "desktop-lyrics") {
+            action("desktop-lyrics:back");
+        } else if (modal.isEmpty()) {
+            action("back");
+        } else {
+            action("close-modal");
+        }
         return;
     }
     if (!modal.isEmpty()) {
@@ -802,6 +1265,11 @@ void NativeHud::key(QString value, bool command) {
     }
     if (value == " ") {
         m_music->player.toggle();
+        return;
+    }
+    // “切歌不打开详情”开启后，资料库回车直接播放当前曲目。
+    if (value == "Enter" && enterPlaysSelection()) {
+        action("music:play");
         return;
     }
     static const QHash<QString, QString> actions{{"ArrowLeft", "column-prev"},
@@ -820,9 +1288,16 @@ bool NativeHud::supportsTrackList() const {
            m_music->current.value("kind") == "song";
 }
 
+bool NativeHud::enterPlaysSelection() const {
+    return skipDetailOnSwitch && frame["mode"] == "archive" && m_music->current.value("kind") == "song";
+}
+
 bool NativeHud::animating(double time) const {
     if (reduced) {
         return !motion.finished() || closing;
+    }
+    if (m_responsive.compact() && (m_mobileTransition.active(time) || m_responsive.animating(time))) {
+        return true;
     }
     const bool lyrics = lyricsMode && modal.isEmpty() && m_lyricsCurve &&
                         time - m_lyricsCurve->start < m_lyricsCurve->duration;
@@ -943,9 +1418,10 @@ void NativeHud::downloadAction(const QString &action) {
         int total = 0;
         if (downloads.needsAlbumConfirm(&loaded, &total)) {
             confirmTitle = QStringLiteral("下载整张（已加载 %1 / %2 首）").arg(loaded).arg(total);
-            confirmBody = QStringLiteral("本页还没有这张专辑的全部曲目。现在下载可以保存已加载的音频和封面，"
-                                         "但不会生成 album.cue。把曲目加载完再下载整张，才会写出完整 cue。");
-            confirmAccept = QStringLiteral("仍然下载");
+            confirmMessage =
+                QStringLiteral("本页还没有这张专辑的全部曲目。现在下载可以保存已加载的音频和封面，"
+                               "但不会生成 album.cue。把曲目加载完再下载整张，才会写出完整 cue。");
+            confirmLabel = QStringLiteral("仍然下载");
             const QPointer<NativeHud> owner(this);
             m_confirm = [owner] {
                 if (!owner) {

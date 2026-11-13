@@ -1,9 +1,15 @@
 #include <QtGlobal>
 #include "FrameProfiler.h"
+#include "AppleTransitionPlan.h"
+#include "AudioOutputFormat.h"
+#include "DiagnosticsDirectory.h"
 
 #include "fg/FgCapability.h"
 #include "Engine.h"
 #include "ProcessMetrics.h"
+#if defined(Q_OS_ANDROID)
+#include "render/HudPaintStats.h"
+#endif
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
@@ -25,6 +31,124 @@
 #include <QQuickWindow>
 
 namespace {
+QString transitionTime(qint64 ms) {
+    return QStringLiteral("%1:%2.%3")
+        .arg(ms / 60000, 2, 10, QLatin1Char('0'))
+        .arg(ms / 1000 % 60, 2, 10, QLatin1Char('0'))
+        .arg(ms % 1000, 3, 10, QLatin1Char('0'));
+}
+
+QString playbackRateLine(const QJsonObject &audio) {
+    const auto rate = audio["nativeRenderedTempo"].toDouble(audio["nativePlayingRate"].toDouble());
+    QString status;
+    if (audio["playing"].toBool()) {
+        if (audio["nativeRateRestoring"].toBool()) {
+            return QStringLiteral("当前曲目  %1× → 1.000× · 回速中").arg(rate, 0, 'f', 3);
+        }
+        if (audio["nativeRateRestored"].toBool()) {
+            status = QStringLiteral("已恢复原速");
+        } else if (std::abs(rate - 1.0) <= 0.001) {
+            status = QStringLiteral("原速播放");
+        } else {
+            status = QStringLiteral("变速播放");
+        }
+    } else if (audio["latchedError"].toBool()) {
+        status = QStringLiteral("播放失败");
+    } else if (audio["requested"].toBool()) {
+        status = QStringLiteral("等待播放");
+    } else if (audio["mediaStatus"].toInt() == QMediaPlayer::EndOfMedia) {
+        status = QStringLiteral("已播完");
+    } else {
+        status = QStringLiteral("暂停");
+    }
+    const double playingRate = audio["playing"].toBool() ? rate : 0.0;
+    return QStringLiteral("当前曲目  %1 · %2×").arg(status).arg(playingRate, 0, 'f', 3);
+}
+
+QString nextTransitionLines(const QJsonObject &audio) {
+    using Phase = AppleTransitionPlan::Phase;
+    using Kind = AppleTransitionPlan::Kind;
+    if (!audio.contains("transitionPhase")) {
+        using Preparation = AppleTransitionPreparation;
+        switch (Preparation(audio["transitionPreparation"].toInt())) {
+        case Preparation::WaitingForPlayback:
+            return QStringLiteral("等待当前曲目开始播放");
+        case Preparation::ResolvingSource:
+            return QStringLiteral("正在获取下一首音源");
+        case Preparation::Accepted:
+            return QStringLiteral("转场未就绪 · 自然切换");
+        case Preparation::SourceUnavailable:
+            return QStringLiteral("下一首音源获取失败 · 自然切换");
+        case Preparation::PlaybackUnavailable:
+            return QStringLiteral("当前音源或输出无法预载 · 自然切换");
+        case Preparation::Natural:
+            return QStringLiteral("自然切换");
+        }
+        return {};
+    }
+    if (!audio.contains("transitionKind")) {
+        return QStringLiteral("正在预载音源并分析");
+    }
+
+    const auto kind = Kind(audio["transitionKind"].toInt());
+    QString text;
+    switch (kind) {
+    case Kind::Original:
+        text = QStringLiteral("自然切换");
+        break;
+    case Kind::Trim:
+        text = QStringLiteral("跳过首尾静音");
+        break;
+    case Kind::Fade:
+        text = QStringLiteral("原速淡化");
+        break;
+    case Kind::BeatMatch:
+        text = audio["transitionAlignment"].toInt() == int(AppleTransitionPlan::Alignment::Bar)
+                   ? QStringLiteral("保音高对拍 · 小节首拍对齐")
+                   : QStringLiteral("保音高对拍 · 拍点对齐");
+        break;
+    }
+    const auto phase = Phase(audio["transitionPhase"].toInt());
+    if (phase == Phase::Unavailable) {
+        text = QStringLiteral("已分析 · 本次自然切换");
+    } else if (phase == Phase::Recovering) {
+        text = QStringLiteral("转场中断 · 正在恢复当前曲目音量");
+    } else if (phase == Phase::Armed) {
+        text += audio["transitionIncomingPlaying"].toBool() ? QStringLiteral(" · 切入中")
+                                                            : QStringLiteral(" · 已调度");
+    } else if (phase == Phase::Ready) {
+        text += QStringLiteral(" · 已预卷");
+    } else if (phase == Phase::Waiting && kind != Kind::Original) {
+        text += QStringLiteral(" · 已分析，等待切入");
+    } else if (phase == Phase::Loading || phase == Phase::Seeking || phase == Phase::Prerolling) {
+        text += QStringLiteral(" · 预卷中");
+    }
+    if (kind != Kind::Original && phase != Phase::Unavailable && phase != Phase::Recovering) {
+        text += QStringLiteral("\n当前出点 %1 · 下一首入点 %2\n切入速度 %3× · 叠播 %4 ms")
+                    .arg(transitionTime(audio["transitionAtMs"].toInteger()),
+                         transitionTime(audio["transitionIncomingMs"].toInteger()))
+                    .arg(audio["transitionRate"].toDouble(), 0, 'f', 3)
+                    .arg(audio["transitionOverlapMs"].toInteger());
+    }
+    static const QStringList notes{"C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"};
+    const auto tonic = audio["transitionIncomingTonic"].toInt(-1);
+    const auto outgoingBpm = audio["transitionOutgoingBpm"].toDouble();
+    const auto bpm = audio["transitionIncomingBpm"].toDouble();
+    const auto barMs = audio["transitionIncomingBarMs"].toInteger(-1);
+    const auto key = tonic >= 0 && tonic < notes.size()
+                         ? notes[tonic] + (audio["transitionIncomingMinor"].toBool() ? " 小调" : " 大调")
+                         : QStringLiteral("未识别");
+    auto tempo = bpm > 0 ? QStringLiteral("%1 BPM").arg(bpm, 0, 'f', 1) : QStringLiteral("未识别");
+    if (bpm > 0 && outgoingBpm > 0) {
+        tempo.prepend(QStringLiteral("%1 → ").arg(outgoingBpm, 0, 'f', 1));
+    }
+    const auto bar = barMs >= 0 ? QStringLiteral("%1 · %2 拍/小节")
+                                      .arg(transitionTime(barMs))
+                                      .arg(audio["transitionIncomingBeatsPerBar"].toInt())
+                                : QStringLiteral("未识别");
+    return text + QStringLiteral("\n调性 %1 · 拍速 %2\n小节首拍 %3").arg(key, tempo, bar);
+}
+
 /** 当前场景图使用的图形 API 名；性能面板、设置页与环境诊断共用同一份显示文本。 */
 QString graphicsApiName(QQuickWindow *window) {
     if (!window || !window->rendererInterface()) {
@@ -55,8 +179,17 @@ FrameProfiler::FrameProfiler(Engine *engine, const QString &path, QObject *paren
     : QObject(parent), m_engine(engine), file(path), stream(&file) {
     clock.start();
     epochMs = QDateTime::currentMSecsSinceEpoch();
-    m_directory = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + "/RHINE Diagnostics";
+    m_directory = diagnosticsDirectory();
     m_sampleTimer.setInterval(500);
+    // 详情默认 1 s 重建一次：headline（一行）保持 500 ms，长文本的布局次数减半。
+    // 设成 0 表示每次采样都重建，用于排查"数字跳得太慢"。
+    {
+        bool ok = false;
+        const int configured = qEnvironmentVariableIntValue("RHINE_PROFILER_DETAILS_MS", &ok);
+        if (ok && configured >= 0) {
+            m_detailsIntervalMs = configured;
+        }
+    }
     connect(&m_sampleTimer, &QTimer::timeout, this, &FrameProfiler::sample);
     connect(engine, &Engine::updated, this, &FrameProfiler::collectStep);
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this] {
@@ -66,9 +199,21 @@ FrameProfiler::FrameProfiler(Engine *engine, const QString &path, QObject *paren
     });
     if (!path.isEmpty()) {
         if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            // 新列一律追加在末尾：旧分析脚本按列号读前 14 列，插在中间会让历史数据整体错位。
+            // 新增列口径（A02/A11）：fg_* 取呈现层最近一次 publish 的值，ledger_* 来自
+            // Engine::performance() 的异步快照——两者都不保证与同一行的 render_frames 属于
+            // 同一帧；ledger_*_peak 是最近 240 个渲染帧的**滚动**峰值（不是 lifetime 峰值）。
             stream << "timestamp_ms,step_cpu_ms,scene_native_ms,scene_metadata_ms,scene_buffers_ms,"
                       "latest_present_gap_ms,latest_sync_cpu_ms,latest_submit_cpu_ms,presents,draws,"
-                      "returning_cards,culled_cards,shadow_only_cards,latest_gpu_draw_calls\n";
+                      "returning_cards,culled_cards,shadow_only_cards,latest_gpu_draw_calls,"
+                      "gpu_timing_status,render_frames,fg_frame_id,fg_frame_ms,fg_swapchain_recreates,"
+                      "fg_device_idle_waits,fg_resize_skips,"
+                      "fg_submits_per_frame,fg_slot_wait_ms,fg_begin_p95_ms,fg_begin_p99_ms,"
+                      "fg_end_p95_ms,fg_end_p99_ms,"
+                      "ledger_resources_peak,ledger_resources_peak_frame,ledger_texture_bytes_peak,"
+                      "ledger_texture_bytes_peak_frame,ledger_frame_bindings,ledger_frame_cover_uploads,"
+                      "ledger_cover_uploads_per_frame,ledger_cover_retransmit_per_kframe,gpu_time_ms,"
+                      "fg_presented,fg_interpolated,fg_rendered\n";
         } else {
             qWarning() << "Cannot open frame profile:" << file.errorString();
         }
@@ -167,6 +312,10 @@ void FrameProfiler::collectStep() {
     }
     // GUI 和渲染线程采样不同步，最近一次呈现间隔不是 GPU 耗时。
     const auto frame = m_engine->frame();
+    // performance() 只取一次：同一行里要读多个键，分开调用会跨帧、互相矛盾。
+    const QVariantMap performance = m_engine->performance();
+    // 帧号与整帧耗时只有呈现层知道（Engine 只记渲染帧数），所以单独取一份。
+    const RhineFg::Stats fg = RhineFg::stats();
     stream << epochMs + clock.elapsed() << ',' << timings.engineMs << ',' << timings.simulateMs << ','
            << timings.metadataMs << ',' << timings.buffersMs << ','
            << presentGapNs.load(std::memory_order_relaxed) / 1000000. << ','
@@ -174,8 +323,31 @@ void FrameProfiler::collectStep() {
            << submitNs.load(std::memory_order_relaxed) / 1000000. << ','
            << presents.load(std::memory_order_relaxed) << ',' << frame["draws"].toArray().size() << ','
            << frame["returningCards"].toInt() << ',' << frame["culledCards"].toInt() << ','
-           << frame["shadowCards"].toInt() << ','
-           << m_engine->performance().value("gpuDrawCalls").toULongLong() << '\n';
+           << frame["shadowCards"].toInt() << ',' << performance.value("gpuDrawCalls").toULongLong()
+           << ','
+           // "没测到"和"没请求"必须能分开：只写一个空的 gpu 时间，事后没法判断
+           // 是驱动不给样本还是我们没开时间戳（A01 的验收就靠这一列）。
+           << performance.value("gpuTimingStatus").toString() << ','
+           << performance.value("renderFrames").toULongLong() << ',' << fg.frameId << ',' << fg.frameMs << ','
+           << fg.swapchainRecreates << ',' << fg.deviceIdleWaits << ',' << fg.resizeSkips
+           << ','
+           // A02：提交次数与两个离屏边界的等待（begin=帧槽等待，end=离屏收尾）。
+           << fg.submitsPerFrame << ',' << fg.slotWaitMs << ',' << fg.beginP95Ms << ',' << fg.beginP99Ms
+           << ',' << fg.endP95Ms << ',' << fg.endP99Ms
+           << ','
+           // A11：整帧资源账本（峰值是滚动 240 帧，帧号对得上 render_frames）。
+           << performance.value("gpuResourcesPeak").toULongLong() << ','
+           << performance.value("gpuResourcesPeakFrame").toULongLong() << ','
+           << performance.value("gpuTextureBytesPeak").toULongLong() << ','
+           << performance.value("gpuTextureBytesPeakFrame").toULongLong() << ','
+           << performance.value("frameBindings").toULongLong() << ','
+           << performance.value("frameCoverUploads").toULongLong() << ','
+           << performance.value("coverUploadsPerFrame").toDouble() << ','
+           << performance.value("coverRetransmitPerKFrame").toDouble()
+           << ','
+           // 最近一次完成的整帧 GPU 时间；FG 开关的 A/B 成本靠它与 render_frames 一起折算。
+           << performance.value("gpuTimeMs").toDouble() << ',' << fg.presented << ',' << fg.interpolated
+           << ',' << fg.rendered << '\n';
 }
 
 FrameProfiler::~FrameProfiler() {
@@ -189,6 +361,7 @@ FrameProfiler::~FrameProfiler() {
 void FrameProfiler::toggleVisible() {
     m_visible = !m_visible;
     updateSampling();
+    emit visibleChanged();
     emit changed();
 }
 
@@ -232,6 +405,7 @@ void FrameProfiler::updateSampling() {
     const bool previous = m_enabled.exchange(enabled, std::memory_order_relaxed);
     if (enabled != previous) {
         if (enabled) {
+            m_detailsBuiltMs = 0; // 刚打开就补一次详情，别让用户先看 1 秒空白。
             m_previousProfiling = m_engine->scene.isProfiling();
             m_engine->scene.profileFrames(true);
             m_previousSampleNs = clock.nsecsElapsed();
@@ -285,7 +459,12 @@ void FrameProfiler::sample() {
     m_metrics.clear();
     for (const auto *key : {"idle", "sceneSleeping", "visible", "steps", "sceneUpdates", "hudUpdates",
                             "renderFrames", "gpuResources", "bindingCreations", "gpuMusicTextureBytes",
-                            "coverUploads", "gpuDrawCalls", "timerActive"}) {
+                            "coverUploads", "gpuDrawCalls", "timerActive",
+                            // A11 整帧资源账本：峰值是最近 240 个渲染帧的滚动峰值，
+                            // *_peak_frame 是持有该峰值的渲染帧号（与 renderFrames 同口径）。
+                            "gpuResourcesPeak", "gpuResourcesPeakFrame", "gpuTextureBytesPeak",
+                            "gpuTextureBytesPeakFrame", "frameBindings", "frameCoverUploads",
+                            "coverUploadsPerFrame", "coverRetransmitPerKFrame", "resourceBudgetMb"}) {
         m_metrics.insert(QString::fromLatin1(key), resources.value(QString::fromLatin1(key)));
     }
     m_metrics.insert("elapsedMs", clock.elapsed() - m_recordStartedMs);
@@ -308,7 +487,38 @@ void FrameProfiler::sample() {
     m_metrics.insert("stepMaxCpuMs", m_stepMaxMs);
     m_metrics.insert("latestSyncCpuMs", syncNs.load(std::memory_order_relaxed) / 1000000.);
     m_metrics.insert("latestSubmitCpuMs", submitNs.load(std::memory_order_relaxed) / 1000000.);
-    m_metrics.insert("gpuTimeMs", QVariant());
+    // HUD 局部重绘账本：本窗口内实际重画了多少像素。`hudDirtyPercent` 接近 100
+    // 就说明命令流整屏都在变（局部重绘无效），远小于 100 才是这条优化在起作用。
+#if defined(Q_OS_ANDROID)
+    {
+        auto &hud = RhineRender::hudPaintStats();
+        const quint64 hudPaints = hud.paints.exchange(0, std::memory_order_relaxed);
+        const quint64 hudDirty = hud.dirtyPixels.exchange(0, std::memory_order_relaxed);
+        const quint64 hudCanvas = hud.canvasPixels.exchange(0, std::memory_order_relaxed);
+        const quint64 cullSeen = hud.cullConsidered.exchange(0, std::memory_order_relaxed);
+        const quint64 cullSkip = hud.cullSkipped.exchange(0, std::memory_order_relaxed);
+        m_metrics.insert("hudPaints", qulonglong(hudPaints));
+        m_metrics.insert("hudDirtyPercent", hudCanvas > 0 ? 100. * double(hudDirty) / double(hudCanvas) : 0.);
+        // 相交预筛命中率：滑列表时静态画面一条都没动，这个数应该很高。
+        m_metrics.insert("hudCullPercent", cullSeen > 0 ? 100. * double(cullSkip) / double(cullSeen) : 0.);
+    }
+    // step 分段账：sceneSample（场景采样）/ observe（曲目观察）/ hudDraw（命令流重建）之和
+    // 加上返回对象组装，约等于 stepMeanCpuMs。切歌动画卡在哪一段，看这三个数。
+    {
+        auto &phase = RhineRender::stepPhaseStats();
+        const quint64 steps = phase.count.exchange(0, std::memory_order_relaxed);
+        const quint64 sampleNs = phase.sceneSampleNs.exchange(0, std::memory_order_relaxed);
+        const quint64 observeNs = phase.observeNs.exchange(0, std::memory_order_relaxed);
+        const quint64 drawNs = phase.hudDrawNs.exchange(0, std::memory_order_relaxed);
+        const double perStep = steps > 0 ? 1. / double(steps) : 0.;
+        m_metrics.insert("stepSceneSampleMs", double(sampleNs) * perStep / 1e6);
+        m_metrics.insert("stepObserveMs", double(observeNs) * perStep / 1e6);
+        m_metrics.insert("stepHudDrawMs", double(drawNs) * perStep / 1e6);
+    }
+#endif
+    m_metrics.insert("gpuTimeMs", resources.value("gpuTimeMs"));
+    // 状态与数值分开透传：面板要在"没有样本"时说明是没样本、没请求还是设备不支持。
+    m_metrics.insert("gpuTimingStatus", resources.value("gpuTimingStatus"));
     {
         QMutexLocker lock(&m_gapMutex);
         m_metrics.insert("gpuAdapter", m_adapterName);
@@ -326,6 +536,7 @@ void FrameProfiler::sample() {
     m_previousFgInterpolated = fg.interpolated;
     m_previousFgRendered = fg.rendered;
     m_metrics.insert("fgLayerActive", fg.layerActive);
+    m_metrics.insert("fgDefaultWindow", fg.defaultWindow);
     m_metrics.insert("fgPresentedFps", fgPresentedFps);
     m_metrics.insert("fgInterpolatedFps", fgInterpolatedFps);
     m_metrics.insert("fgRenderFps", fgRenderFps);
@@ -337,7 +548,23 @@ void FrameProfiler::sample() {
     m_metrics.insert("fgPrepareMs", fg.prepareMs);
     m_metrics.insert("fgDispatchMs", fg.dispatchMs);
     m_metrics.insert("fgCompositeMs", fg.compositeMs);
-    m_metrics.insert("fgPresentMs", fg.presentMs);
+    // 整帧耗时取代原来的"上屏"耗时：后者在 endFrame 之后重新起表，只量到记账语句，
+    // 恒≈0 却占着一列指标，会让人误以为上屏不要钱。
+    m_metrics.insert("fgFrameMs", fg.frameMs);
+    m_metrics.insert("fgFrameId", fg.frameId);
+    m_metrics.insert("fgSwapchainRecreates", fg.swapchainRecreates);
+    m_metrics.insert("fgDeviceIdleWaits", fg.deviceIdleWaits);
+    m_metrics.insert("fgResizeSkips", fg.resizeSkips);
+    // A02：帧槽等待 / 离屏收尾的 EMA 与原始分位分开暴露。面板要能回答"每帧提交几次、
+    // begin 等槽多久、end 收尾多久"，而不是只有一个含混的"起始/收尾"。
+    m_metrics.insert("fgSubmitsPerFrame", fg.submitsPerFrame);
+    m_metrics.insert("fgSlotWaitMs", fg.slotWaitMs);
+    m_metrics.insert("fgBeginMs", fg.beginMs);
+    m_metrics.insert("fgEndMs", fg.endMs);
+    m_metrics.insert("fgBeginP95Ms", fg.beginP95Ms);
+    m_metrics.insert("fgBeginP99Ms", fg.beginP99Ms);
+    m_metrics.insert("fgEndP95Ms", fg.endP95Ms);
+    m_metrics.insert("fgEndP99Ms", fg.endP99Ms);
     m_metrics.insert("fgSwapchainImages", fg.swapchainImages);
     m_metrics.insert("fgSwapchainFormat", fg.swapchainFormat);
     // 呈现模式决定帧率上限：FG 层自己建的交换链知道确切值；走默认路径时交换链归 Qt，
@@ -351,7 +578,7 @@ void FrameProfiler::sample() {
     m_metrics.insert("fgMotionVectorsReady", fg.motionVectorsReady);
     m_metrics.insert("fgRenderSize", fg.renderSize);
     m_metrics.insert("fgDisplaySize", fg.displaySize);
-    if (fg.layerActive) {
+    if (fg.layerActive && !fg.defaultWindow) {
         // 呈现层接管时，屏幕上真正发生的事只有它知道：用它的间隔与计数覆盖。
 #ifdef Q_OS_LINUX
         // qtFps 在这里只是"场景渲染帧"：呈现计数含插值帧与重复帧，直接当帧率会让人
@@ -370,18 +597,20 @@ void FrameProfiler::sample() {
         m_metrics.insert("over33ms", fg.over33);
         m_metrics.insert("over50ms", fg.over50);
         m_metrics.insert("over100ms", fg.over100);
-        if (!fg.adapterName.isEmpty())
+        if (!fg.adapterName.isEmpty()) {
             m_metrics.insert("gpuAdapter", fg.adapterName);
-        if (!fg.backendName.isEmpty())
+        }
+        if (!fg.backendName.isEmpty()) {
             m_metrics.insert("gpuBackend", fg.backendName);
+        }
     }
 #ifdef Q_OS_LINUX
     // 标题帧率的口径在这里定：插帧真的在出帧时，屏幕上每秒多出来的那些画面就是插值帧，
     // 只报渲染帧会明显低于肉眼所见。取渲染+插值而不是呈现计数——呈现还含强制重渲的
     // 重复帧，用它当帧率会虚高。其余情况沿用原口径（未接管即 Qt 帧率，接管即场景渲染帧）。
     const bool interpolating = fg.layerActive && fg.interpolationAvailable && fg.interpolationWanted;
-    m_metrics.insert("headlineFps", interpolating ? fgRenderFps + fgInterpolatedFps
-                                                  : m_metrics.value("qtFps").toDouble());
+    m_metrics.insert("headlineFps",
+                     interpolating ? fgRenderFps + fgInterpolatedFps : m_metrics.value("qtFps").toDouble());
 #endif
     m_previousSampleNs = now;
     m_previousCpuNs = process.cpuNanoseconds;
@@ -397,19 +626,70 @@ void FrameProfiler::sample() {
         audio["controllerPlaying"] = player.state["playing"].toBool();
     }
     m_metrics.insert("audio", audio.toVariantMap());
-    formatMetrics();
+    if (m_visible && m_detailsEnabled) {
+        updateTransitionDetails(audio);
+    }
+    // 详情按自己的节奏重建：面板收起时完全不建，展开时默认 1 s 一次。
+    // headline 仍然每次采样都刷——它只有一行，重排成本可以忽略。
+    const bool wantDetails = m_detailsEnabled && (m_detailsIntervalMs <= 0 ||
+                                                  clock.elapsed() - m_detailsBuiltMs >= m_detailsIntervalMs);
+    formatMetrics(wantDetails);
+    if (wantDetails) {
+        m_detailsBuiltMs = clock.elapsed();
+    }
     if (m_recording) {
         m_samples.append(QJsonObject::fromVariantMap(m_metrics));
+        const auto previousStatus = m_status;
         m_status =
             QStringLiteral("正在收集 %1 秒 · 最长 10 分钟").arg((clock.elapsed() - m_recordStartedMs) / 1000);
+        if (m_status != previousStatus) {
+            emit statusChanged();
+        }
         if (!m_saving && (m_samples.size() >= 1200 || clock.elapsed() - m_recordStartedMs >= 600000)) {
             saveRecording();
         }
     }
+    // 只发指标本身：QML 的 headline / details 各自绑更细的信号，不再被这条拖着重估。
+    emit metricsChanged();
     emit changed();
 }
 
-void FrameProfiler::formatMetrics() {
+void FrameProfiler::setDetailsEnabled(bool enabled) {
+    if (m_detailsEnabled == enabled) {
+        return;
+    }
+    m_detailsEnabled = enabled;
+    if (enabled) {
+        // 展开时立刻补一次，不等下一个刷新间隔。
+        m_detailsBuiltMs = 0;
+    }
+    emit detailsEnabledChanged();
+}
+
+/** 单独刷新短文本，避免播放速率变化触发整个性能详情重排。 */
+void FrameProfiler::updateTransitionDetails(const QJsonObject &audio) {
+    QString text;
+    if ((audio["outputBackend"].toInt() == 2 || audio["outputBackend"].toInt() == 3) &&
+        m_engine->host.preference("apple-smart-transition") == "on") {
+        text = playbackRateLine(audio);
+        if (m_engine->app) {
+            const auto &player = m_engine->app->music.player;
+            const auto next = player.queue.at(player.queue.nextIndex(player.mode));
+            if (next.isEmpty() || PlaybackQueue::identity(next) == PlaybackQueue::identity(player.current)) {
+                text += QStringLiteral("\n下一首  无");
+            } else {
+                text += QStringLiteral("\n下一首  %1\n%2")
+                            .arg(next["title"].toString(), nextTransitionLines(audio));
+            }
+        }
+    }
+    if (text != m_transitionDetails) {
+        m_transitionDetails = text;
+        emit transitionDetailsChanged();
+    }
+}
+
+void FrameProfiler::formatMetrics(bool withDetails) {
     const auto number = [this](const char *key, int precision = 1) {
         return QString::number(m_metrics.value(key).toDouble(), 'f', precision);
     };
@@ -429,8 +709,8 @@ void FrameProfiler::formatMetrics() {
 #endif
     QString stateLabel;
     if (!fgActive) {
-        stateLabel = shown ? (idle ? QStringLiteral("按需休眠") : QStringLiteral("活动"))
-                           : QStringLiteral("后台");
+        stateLabel =
+            shown ? (idle ? QStringLiteral("按需休眠") : QStringLiteral("活动")) : QStringLiteral("后台");
 #ifdef Q_OS_LINUX
     } else if (!fgAvailable) {
 #else
@@ -455,24 +735,39 @@ void FrameProfiler::formatMetrics() {
         stateLabel = QStringLiteral("帧生成 · 插值中");
 #endif
     }
-    m_headline = QStringLiteral("%1 FPS · %2 · %3")
+    const auto headline = QStringLiteral("%1 FPS · %2 · %3")
 #ifdef Q_OS_LINUX
-                     .arg(number("headlineFps"), stateLabel,
+                              .arg(number("headlineFps"), stateLabel,
 #else
-                     .arg(number("qtFps"), stateLabel,
+                              .arg(number("qtFps"), stateLabel,
 #endif
-                          m_metrics.value("fgPresentMode").toString());
+                                   m_metrics.value("fgPresentMode").toString());
+    // 只在真的变了才通知：QML 那边重新求值一次属性、再比一次字符串，都是白付的。
+    if (headline != m_headline) {
+        m_headline = headline;
+        emit headlineChanged();
+    }
+    if (!withDetails) {
+        // 面板收起，或还没到详情刷新间隔：后面几百行拼接一个字符都不必做。
+        return;
+    }
+    // 隐式共享拷贝，只是把旧缓冲的引用计数 +1；后面 `m_details = ...` 会把引用还回去，
+    // 不会多复制一次正文。用来在末尾判断"这段文本到底变没变"。
+    const auto previousDetails = m_details;
     const auto memory = residentBytes < 0 ? QStringLiteral("不可用")
                                           : QString::number(residentBytes / 1048576., 'f', 1) + " MiB";
     // 帧生成块排在最前：接管呈现后，屏幕上真正发生的是什么只有这几行说得清。
+    const bool fgDefault = m_metrics.value("fgDefaultWindow").toBool();
     QString fgDetails;
     if (!fgActive && RhineFg::capability().compiledIn) {
         // 没接管时也给一行：否则用户看不出"这台机器本可以插帧，只是这次走了默认路径"。
         const auto &capability = RhineFg::capability();
-        const auto note = !capability.presentLayerActive
-                              ? (capability.reason.isEmpty() ? QStringLiteral("默认呈现路径")
-                                                             : capability.reason)
-                              : QStringLiteral("暂不可用");
+        const auto note =
+            !capability.presentLayerActive
+                ? (capability.reason.isEmpty() ? QStringLiteral("默认呈现路径") : capability.reason)
+                : (capability.interpolationAvailable
+                       ? QStringLiteral("未开启")
+                       : (capability.reason.isEmpty() ? QStringLiteral("暂不可用") : capability.reason));
         fgDetails = QStringLiteral("帧生成        未接管 · %1\n\n").arg(note);
     } else if (fgActive) {
         const auto ready = [this](const char *key) {
@@ -482,30 +777,47 @@ void FrameProfiler::formatMetrics() {
             const auto size = m_metrics.value(key).toSize();
             return QStringLiteral("%1×%2").arg(size.width()).arg(size.height());
         };
-        const auto millis = [&number](const char *key) {
-            return number(key, 2);
-        };
+        const auto millis = [&number](const char *key) { return number(key, 2); };
         const auto interpolationState =
             !m_metrics.value("fgInterpolationAvailable").toBool()
                 ? QStringLiteral("插值 不可用")
                 : (m_metrics.value("fgInterpolationWanted").toBool() ? QStringLiteral("插值 开")
-                                                                    : QStringLiteral("插值 关"));
-        fgDetails =
-            QStringLiteral("帧生成        %1 · %2\n呈现 / 渲染    %3 / %4 FPS · 插值 %5 FPS\n")
-                .arg(QStringLiteral("已接管"), interpolationState, number("fgPresentedFps"),
-                     number("fgRenderFps"), number("fgInterpolatedFps"))
-            + QStringLiteral("每帧耗时      取图 %1 · 场景 %2 · 光流+重建 %3 · 插值 %4 ms\n")
-                  .arg(millis("fgAcquireMs"), millis("fgSceneMs"), millis("fgPrepareMs"),
-                       millis("fgDispatchMs"))
-            + QStringLiteral("              合成 / 上屏  %1 / %2 ms\n")
-                  .arg(millis("fgCompositeMs"), millis("fgPresentMs"))
-            + QStringLiteral("交换链        %1 张 · %2 · %3 → %4 · 呈现 %5\n深度 / 运动矢量  %6 / %7\n\n")
-                  .arg(number("fgSwapchainImages", 0), m_metrics.value("fgSwapchainFormat").toString(),
-                       sizeText("fgRenderSize"), sizeText("fgDisplaySize"),
-                       m_metrics.value("fgPresentMode").toString(), ready("fgDepthReady"),
-                       ready("fgMotionVectorsReady"));
+                                                                     : QStringLiteral("插值 关"));
+        if (fgDefault) {
+            // 默认 QQuickWindow 内补帧：只保留与它相关的数，交换链和离屏耗时归 Qt。
+            fgDetails =
+                QStringLiteral("帧生成        默认窗口 · %1\n呈现 / 渲染    %2 / %3 FPS · 插值 %4 FPS\n")
+                    .arg(interpolationState, number("fgPresentedFps"), number("fgRenderFps"),
+                         number("fgInterpolatedFps")) +
+                QStringLiteral("输入 / 显示    %1 → %2\n深度 / 运动矢量  %3 / %4\n\n")
+                    .arg(sizeText("fgRenderSize"), sizeText("fgDisplaySize"), ready("fgDepthReady"),
+                         ready("fgMotionVectorsReady"));
+        }
+        if (!fgDefault) {
+            fgDetails = QStringLiteral("帧生成        %1 · %2\n呈现 / 渲染    %3 / %4 FPS · 插值 %5 FPS\n")
+                            .arg(QStringLiteral("已接管"), interpolationState, number("fgPresentedFps"),
+                                 number("fgRenderFps"), number("fgInterpolatedFps")) +
+                        QStringLiteral("每帧耗时      取图 %1 · 场景 %2 · 光流+重建 %3 · 插值 %4 ms\n")
+                            .arg(millis("fgAcquireMs"), millis("fgSceneMs"), millis("fgPrepareMs"),
+                                 millis("fgDispatchMs")) +
+                        QStringLiteral("              合成 %1 ms · 整帧 %2 ms\n")
+                            .arg(millis("fgCompositeMs"), millis("fgFrameMs")) +
+                        QStringLiteral("交换链        %1 张 · %2 · %3 → %4 · 呈现 %5\n")
+                            .arg(number("fgSwapchainImages", 0),
+                                 m_metrics.value("fgSwapchainFormat").toString(), sizeText("fgRenderSize"),
+                                 sizeText("fgDisplaySize"), m_metrics.value("fgPresentMode").toString())
+                        // 重建/等待/去重三个数要一起看才算证据：跳过数随帧数增长、等待数不增长，
+                        // 才说明同尺寸的尺寸同步没有再去等 GPU 空闲（A10）。
+                        + QStringLiteral("重建 / 设备等待 / 尺寸去重  %1 / %2 / %3 次\n")
+                              .arg(number("fgSwapchainRecreates", 0), number("fgDeviceIdleWaits", 0),
+                                   number("fgResizeSkips", 0)) +
+                        QStringLiteral("深度 / 运动矢量  %1 / %2\n\n")
+                            .arg(ready("fgDepthReady"), ready("fgMotionVectorsReady"));
+        }
     }
-    m_details = fgDetails + QStringLiteral("场景提交      %1 FPS\nQt 帧间隔 P50 / P95  %2 / %3 ms\n"
+    m_details =
+        fgDetails +
+        QStringLiteral("场景提交      %1 FPS\nQt 帧间隔 P50 / P95  %2 / %3 ms\n"
                        "P99 / 峰值    %4 / %5 ms\n>33 / 50 / 100 ms   %6 / %7 / %8\n"
                        "逻辑 CPU 均值 / 峰值  %9 / %10 ms\n同步 / 提交 CPU  %11 / %12 ms\n"
                        "主进程 CPU    %13%\n主进程常驻内存  %14\n"
@@ -517,22 +829,161 @@ void FrameProfiler::formatMetrics() {
             .arg(cpu < 0 ? QStringLiteral("不可用") : number("mainProcessCpuOneCorePercent"), memory,
                  number("gpuDrawCalls", 0), number("gpuResources", 0))
             .arg(QString::number(m_metrics.value("gpuMusicTextureBytes").toDouble() / 1048576., 'f', 1));
+    // A02：提交/等待放在始终显示的详情区，而不是只在 FG 接管时才出现的 fgDetails——
+    // 默认呈现路径同样有 begin 等槽与 end 收尾，少一次提交也要能看见。
+    m_details += QStringLiteral("\n提交 / 等待    每帧提交 %1 次 · 帧槽等待 %2 ms（P95/P99 %3/%4）\n"
+                                "              离屏收尾 %5 ms（P95/P99 %6/%7）")
+                     .arg(number("fgSubmitsPerFrame", 0), number("fgSlotWaitMs", 2),
+                          number("fgBeginP95Ms", 2), number("fgBeginP99Ms", 2))
+                     .arg(number("fgEndMs", 2), number("fgEndP95Ms", 2), number("fgEndP99Ms", 2));
+    // A11：整帧资源账本（本帧 + 滚动峰值 + 重传率 + 预算）。峰值带帧号，便于回查 CSV 的
+    // render_frames；预算开关只告警不降级，所以这里显示"上限"而不是"是否已降级"。
+    const quint64 budgetMb = m_metrics.value("resourceBudgetMb").toULongLong();
+    m_details +=
+        QStringLiteral("\n整帧资源      本帧 资源 %1 个 · 纹理 %2 MiB\n"
+                       "              峰值（滚动 240 帧） 资源 %3 个 @帧 %4 · "
+                       "纹理 %5 MiB @帧 %6\n"
+                       "              SRB 新建 %7 个/帧 · 封面纹理上传 %8 次/帧 · "
+                       "封面重传率 %9 次/千帧\n"
+                       "              预算 %10")
+            .arg(number("gpuResources", 0),
+                 QString::number(m_metrics.value("gpuMusicTextureBytes").toDouble() / 1048576., 'f', 1),
+                 number("gpuResourcesPeak", 0), number("gpuResourcesPeakFrame", 0))
+            .arg(QString::number(m_metrics.value("gpuTextureBytesPeak").toDouble() / 1048576., 'f', 1),
+                 number("gpuTextureBytesPeakFrame", 0), number("frameBindings", 0),
+                 number("frameCoverUploads", 0))
+            .arg(number("coverRetransmitPerKFrame", 2),
+                 budgetMb ? QStringLiteral("%1 MiB").arg(budgetMb)
+                          : QStringLiteral("关（RHINE_RESOURCE_BUDGET_MB）"));
+    // GPU 计时状态必须显式写出来：状态不是 ok 时数值列是空的（或上一个可信样本），
+    // 只显示数字会让读者把"没测到"当成"GPU 不花时间"——A01 要修的就是这个坑。
+    const QString gpuTiming = m_metrics.value("gpuTimingStatus").toString();
+    QString gpuTimingText;
+    if (gpuTiming == QLatin1String("ok")) {
+        gpuTimingText = QStringLiteral("%1 ms").arg(number("gpuTimeMs", 2));
+    } else if (gpuTiming == QLatin1String("disabled")) {
+        gpuTimingText = QStringLiteral("未启用 · 后端支持时间戳，但创建 QRhi / 图形配置时没请求");
+    } else if (gpuTiming == QLatin1String("noSample")) {
+        gpuTimingText = QStringLiteral("无样本 · 已请求时间戳，这一帧还没有已完成的查询结果");
+    } else if (gpuTiming == QLatin1String("unsupported")) {
+        gpuTimingText = QStringLiteral("不支持 · 当前图形后端没有时间戳查询能力");
+    } else {
+        gpuTimingText = QStringLiteral("未知（%1）")
+                            .arg(gpuTiming.isEmpty() ? QStringLiteral("没有状态字段") : gpuTiming);
+    }
+    m_details += QStringLiteral("\n\nGPU 时间  %1").arg(gpuTimingText);
     const auto audio = m_metrics.value("audio").toMap();
-    m_details += QStringLiteral("\n\n音频状态 / 错误码  %1 / %2\n进度 / 时长  %3 / %4 ms\n"
-                                "缓冲  %5% · 解码缓冲  %6\n解码格式  %7 Hz / %8 声道\n"
-                                "输出设备数  %9 · 系统网络状态  %10")
-                     .arg(audio.value("mediaStatus").toInt())
-                     .arg(audio.value("errorCode").toInt())
-                     .arg(audio.value("positionMs").toLongLong())
-                     .arg(audio.value("durationMs").toLongLong())
-                     .arg(audio.value("bufferProgress").toDouble() * 100, 0, 'f', 0)
-                     .arg(audio.value("decodedBuffers").toLongLong())
-                     .arg(audio.value("sampleRateHz").toInt())
-                     .arg(audio.value("channels").toInt())
-                     .arg(audio.value("outputCount").toInt())
-                     .arg(audio.contains("networkReachability")
-                              ? QString::number(audio.value("networkReachability").toInt())
-                              : QStringLiteral("未采集"));
+    if (audio.value("outputBackend").toInt() == 2) {
+        const auto codec = quint32(audio.value("sourceCodecFourCC").toDouble());
+        const auto rate = audio.value("sourceSampleRateHz").toInt();
+        const auto channels = audio.value("sourceChannels").toInt();
+        QString trackFormat = QStringLiteral("未提供");
+        if (rate > 0 && channels > 0) {
+            trackFormat = QStringLiteral("%1 Hz / %2 声道").arg(rate).arg(channels);
+        }
+        if (codec != 0) {
+            QByteArray name;
+            for (int shift = 24; shift >= 0; shift -= 8) {
+                name.append(char((codec >> shift) & 0xff));
+            }
+            trackFormat += QStringLiteral(" · %1").arg(QString::fromLatin1(name).trimmed());
+        }
+        m_details += QStringLiteral("\n\n音频输出链路 · AVPlayer\n源音轨  %1\n进度 / 时长  %2 / %3 ms"
+                                    "\n前向缓冲  %4 ms · AVPlayer 错误码  %5")
+                         .arg(trackFormat)
+                         .arg(audio.value("positionMs").toLongLong())
+                         .arg(audio.value("durationMs").toLongLong())
+                         .arg(audio.value("nativeBufferedMs").toLongLong())
+                         .arg(audio.value("nativeErrorCode").toLongLong());
+        if (audio.value("routeSampleRateHz").toDouble() > 0) {
+            m_details += QStringLiteral("\n系统路由  %1 Hz / %2 声道")
+                             .arg(audio.value("routeSampleRateHz").toInt())
+                             .arg(audio.value("routeChannels").toInt());
+        } else if (audio.value("outputSystemFormatStatus").toInt() == 1) {
+            m_details +=
+                QStringLiteral("\n系统流格式  %1")
+                    .arg(AudioOutputFormat::describe(audio.value("outputSystemSampleRateHz").toInt(),
+                                                     audio.value("outputSystemChannels").toInt(),
+                                                     audio.value("outputSystemSampleFormat").toInt()));
+        }
+        if (audio.contains("routeSpatialAudioEnabled")) {
+            m_details += audio.value("routeSpatialAudioEnabled").toBool()
+                             ? QStringLiteral("\n系统路由空间音频  已启用")
+                             : QStringLiteral("\n系统路由空间音频  未启用");
+        }
+    } else {
+        m_details += QStringLiteral("\n\n音频状态 / 错误码  %1 / %2\n进度 / 时长  %3 / %4 ms\n"
+                                    "缓冲  %5% · 解码缓冲  %6\n解码格式  %7 Hz / %8 声道\n"
+                                    "输出设备数  %9 · 系统网络状态  %10")
+                         .arg(audio.value("mediaStatus").toInt())
+                         .arg(audio.value("errorCode").toInt())
+                         .arg(audio.value("positionMs").toLongLong())
+                         .arg(audio.value("durationMs").toLongLong())
+                         .arg(audio.value("bufferProgress").toDouble() * 100, 0, 'f', 0)
+                         .arg(audio.value("decodedBuffers").toLongLong())
+                         .arg(audio.value("sampleRateHz").toInt())
+                         .arg(audio.value("channels").toInt())
+                         .arg(audio.value("outputCount").toInt())
+                         .arg(audio.contains("networkReachability")
+                                  ? QString::number(audio.value("networkReachability").toInt())
+                                  : QStringLiteral("未采集"));
+        const auto audioFormat = [&](const char *rate, const char *channels, const char *format) {
+            return AudioOutputFormat::describe(audio.value(rate).toInt(), audio.value(channels).toInt(),
+                                               audio.value(format).toInt());
+        };
+        const bool outputKnown = audio.value("outputClientFormatStatus").toInt() == 1;
+        QStringList conversions;
+        if (audio.value("outputSampleRateConverted").toBool()) {
+            conversions << QStringLiteral("采样率");
+        }
+        if (audio.value("outputSampleFormatConverted").toBool()) {
+            conversions << QStringLiteral("采样格式");
+        }
+        if (audio.value("outputChannelLayoutConverted").toBool()) {
+            conversions << QStringLiteral("声道布局");
+        }
+        const int resampler = audio.value("outputResampler", -1).toInt();
+        const auto outputMode = audio.value("outputPolicy").toInt() == 1 ? QStringLiteral("保留源格式")
+                                                                         : QStringLiteral("跟随系统");
+        m_details +=
+            QStringLiteral("\n\n音频输出链路 · %1\n解码 PCM  %2\n应用提交  %3\n系统当前  %4\n设备首选  "
+                           "%5\n硬件格式  未获取\n")
+                .arg(outputMode)
+                .arg(audioFormat("sampleRateHz", "channels", "sampleFormat"))
+                .arg(audioFormat("outputSampleRateHz", "outputChannels", "outputSampleFormat"))
+                .arg(audioFormat("outputSystemSampleRateHz", "outputSystemChannels",
+                                 "outputSystemSampleFormat"))
+                .arg(audioFormat("outputPreferredSampleRateHz", "outputPreferredChannels",
+                                 "outputPreferredSampleFormat"));
+        if (audio.value("outputSystemFormatStatus").toInt() == 2) {
+            m_details += QStringLiteral("系统路由采样率  %1 Hz / %2 声道（采样格式未知）\n")
+                             .arg(audio.value("outputSystemSampleRateHz").toInt())
+                             .arg(audio.value("outputSystemChannels").toInt());
+        }
+        m_details +=
+            QStringLiteral(
+                "输出  QAudioSink / 系统音频路径\n转换  %1 · %2%3\n重采样  %4 · 抖动 %5\n转换均值 / 峰值  %6 "
+                "/ "
+                "%7 ms\n"
+                "输出缓冲  %8 ms · 欠载 %9\n输出错误 / 重建  %10 / %11\n系统内部转换  未测量；有效位深未获取")
+                .arg(outputKnown
+                         ? (conversions.isEmpty() ? QStringLiteral("PCM 格式保持") : conversions.join(" / "))
+                         : QStringLiteral("未打开"))
+                .arg(audio.value("outputPolicy").toInt() == 1 ? QStringLiteral("优先保留音源格式")
+                                                              : QStringLiteral("匹配系统或设备首选格式"))
+                .arg(audio.value("outputFallback").toBool() ? QStringLiteral("（源格式不支持，已回退）")
+                                                            : QString())
+                .arg(resampler < 0    ? QStringLiteral("未运行")
+                     : resampler == 0 ? QStringLiteral("旁路")
+                                      : QStringLiteral("SWR / filter_size=64"))
+                .arg(audio.value("outputDither").toBool() ? QStringLiteral("TPDF") : QStringLiteral("关"))
+                .arg(audio.value("outputResampleMeanMs").toDouble(), 0, 'f', 3)
+                .arg(audio.value("outputResampleMaxMs").toDouble(), 0, 'f', 3)
+                .arg(audio.value("outputBufferMs").toDouble(), 0, 'f', 1)
+                .arg(audio.value("outputUnderruns").toInt())
+                .arg(audio.value("outputError").toInt())
+                .arg(audio.value("outputRebuilds").toInt());
+    }
     // 当前渲染配置：后端取自窗口实际使用的图形 API（不是启动时的选择，回退后也能看出来），
     // 其余取自运行时环境变量——RhiScene 读的是同一份值，所以这里显示的就是真正生效的配置。
     const auto adapter = m_metrics.value("gpuAdapter").toString();
@@ -586,8 +1037,7 @@ void FrameProfiler::formatMetrics() {
     } else if (aaMode == "fsr" || aaMode == "fsr1" || aaMode == "fsr3") {
         // 引擎由渲染器写入：fsr3 = FFX 计算后端，shader = EASU/RCAS 片元实现。
         const auto engine = qEnvironmentVariable("RHINE_FSR_ENGINE");
-        aaLine += engine == "fsr3" ? QStringLiteral("（FSR3）")
-                                   : QStringLiteral("（FSR1 EASU/RCAS）");
+        aaLine += engine == "fsr3" ? QStringLiteral("（FSR3）") : QStringLiteral("（FSR1 EASU/RCAS）");
         // 档位和锐化都直接改变画面，放进监视窗方便和眼睛看到的对照。
         const auto quality = qEnvironmentVariable("RHINE_FSR_QUALITY");
         QString qualityName = QStringLiteral("原生 AA");
@@ -615,21 +1065,27 @@ void FrameProfiler::formatMetrics() {
     if (aaMode == "metalfx") {
         const auto actual = m_engine->renderTelemetry.snapshot().value("implementation").toString();
         aaLine = actual == "metalfx-temporal" ? QStringLiteral("MetalFX 时域抗锯齿 / 超分")
-                                             : QStringLiteral("MetalFX 未运行（系统或设备不支持）");
+                                              : QStringLiteral("MetalFX 未运行（系统或设备不支持）");
     }
 #endif
-    const int renderScale =
-        qEnvironmentVariableIsEmpty("RHINE_RENDER_SCALE") ? 100 : qEnvironmentVariableIntValue("RHINE_RENDER_SCALE");
-    const int supersample =
-        qEnvironmentVariableIsEmpty("RHINE_SUPERSAMPLE") ? 1 : qEnvironmentVariableIntValue("RHINE_SUPERSAMPLE");
+    const int renderScale = qEnvironmentVariableIsEmpty("RHINE_RENDER_SCALE")
+                                ? 100
+                                : qEnvironmentVariableIntValue("RHINE_RENDER_SCALE");
+    const int supersample = qEnvironmentVariableIsEmpty("RHINE_SUPERSAMPLE")
+                                ? 1
+                                : qEnvironmentVariableIntValue("RHINE_SUPERSAMPLE");
     QString renderLine = QStringLiteral("渲染 %1%").arg(renderScale);
     if (supersample > 1) {
         renderLine += QStringLiteral(" · 超采样 %1x").arg(supersample);
     }
     // 这一行既有抗锯齿也有 FSR 超分，所以叫"画质模式"；与上面"渲染后端"等宽以便对齐。
-    m_details.prepend(QStringLiteral("渲染后端  %1 · GPU 设备  %2\n画质模式  %3 · %4\n")
-                          .arg(backend, adapter.isEmpty() ? QStringLiteral("未知") : adapter, aaLine,
-                               renderLine));
+    m_details.prepend(
+        QStringLiteral("渲染后端  %1 · GPU 设备  %2\n画质模式  %3 · %4\n")
+            .arg(backend, adapter.isEmpty() ? QStringLiteral("未知") : adapter, aaLine, renderLine));
+    // 文本真正变了才通知 QML。一次 memcmp 远比一次整段 Text 重排便宜。
+    if (m_details != previousDetails) {
+        emit detailsChanged();
+    }
 }
 
 QJsonObject FrameProfiler::environment() const {
@@ -656,6 +1112,7 @@ bool FrameProfiler::startRecording() {
     }
     if (!QDir().mkpath(m_directory)) {
         m_status = QStringLiteral("无法创建诊断目录，请检查文稿目录权限。");
+        emit statusChanged();
         emit changed();
         return false;
     }
@@ -676,6 +1133,8 @@ bool FrameProfiler::startRecording() {
     m_status = QStringLiteral("正在收集性能与音频诊断，请复现问题后停止并导出。");
     updateSampling();
     m_engine->host.playbackDiagnostics.record("snapshot", m_engine->host.playbackSnapshot());
+    emit recordingChanged();
+    emit statusChanged();
     emit changed();
     return true;
 }
@@ -732,6 +1191,8 @@ bool FrameProfiler::saveRecording() {
         m_status = QStringLiteral("导出失败，记录已保留；请检查目录权限后点击“重试导出”。");
         m_saving = false;
         updateSampling();
+        emit statusChanged();
+        emit recordingChanged();
         emit changed();
         return false;
     }
@@ -745,6 +1206,8 @@ bool FrameProfiler::saveRecording() {
     }
     m_status = QStringLiteral("已保存：%1").arg(QFileInfo(report.fileName()).fileName());
     updateSampling();
+    emit statusChanged();
+    emit recordingChanged();
     emit changed();
     return true;
 }

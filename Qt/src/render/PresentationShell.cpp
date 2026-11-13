@@ -1,5 +1,6 @@
 #include <QtGlobal>
 #include "PresentationShell.h"
+#include "../CrashDiagnostics.h"
 #ifdef Q_OS_DARWIN
 #include "MetalFxBackend.h"
 #endif
@@ -62,6 +63,14 @@ QShader loadShader(const QString &name) {
 
 quint64 bindingKey(const QRhiTexture *a, const QRhiTexture *b) {
     return (quint64(quintptr(a)) * 0x9E3779B97F4A7C15ull) ^ quint64(quintptr(b));
+}
+
+/// 已排序样本取分位。呈现间隔（gapP*）与 A02 的 begin/end 分位共用同一套取整规则，
+/// 避免两处"分位"因为四舍五入/向下取整不同而对不上。
+double sortedQuantile(const QList<double> &sorted, double quantile) {
+    const int last = sorted.size() - 1;
+    const int index = std::clamp(int(std::lround(quantile * last)), 0, last);
+    return sorted.at(index);
 }
 
 } // namespace
@@ -136,6 +145,7 @@ void PresentationShell::shutdown() {
     if (m_presenter) {
         m_presenter->release();
     }
+    m_rhi = nullptr;
     RhineFg::clear();
     m_backend->setWindow(nullptr);
     m_engine->rootContext()->setContextProperty(QStringLiteral("rhineHostWindow"),
@@ -158,6 +168,11 @@ bool PresentationShell::compiledIn() {
 }
 
 bool PresentationShell::supportsBackend(const QString &name) {
+#if defined(Q_OS_WIN) && RHINE_ENABLE_D3D12_BACKEND
+    if (name == QLatin1String("d3d12")) {
+        return true;
+    }
+#endif
 #if QT_CONFIG(metal)
     if (name == QLatin1String("metal")) {
         return true;
@@ -443,6 +458,15 @@ void PresentationShell::syncSizes() {
     // 就是"UI 少了一整块"；同时 fit() 不再截断，文字也变长。
     // Engine::resize() 对相同尺寸会早退，所以这里每帧调用没有额外开销。
     m_backend->resize(m_size.width(), m_size.height());
+    // GPU 侧的尺寸确认（只确认、不重建）：m_needRecreate 为真时下一步会走
+    // recreateSwapchain()，只有那里才允许真正重建——它会作废跨尺寸的插值历史并强制
+    // 重画一帧，抢在这里重建就会拿到按旧尺寸插出来的帧（画面闪一下）。所以这里只在
+    // "没有待重建"且 presenter 的交换链尺寸已等于目标尺寸时把请求推下去；后端在这种
+    // 情况下只做尺寸比较（A10 的 resizeSkips），一次 finish 都不会发生。
+    // 这一句同时是"去重生效"在 CSV 里的证据：跳过数应随帧数增长，设备等待数不增长。
+    if (m_presenter && !m_needRecreate && m_presenter->extent() == pixelSize()) {
+        m_presenter->resize(pixelSize(), false);
+    }
 }
 
 const RhineFg::FrameInputs &PresentationShell::currentFrameInputs() const {
@@ -562,14 +586,9 @@ void PresentationShell::refreshGapStats() {
         sorted.append(m_gapRing[size_t(index)]);
     }
     std::sort(sorted.begin(), sorted.end());
-    const auto pick = [&sorted](double quantile) {
-        const int last = sorted.size() - 1;
-        const int index = std::clamp(int(std::lround(quantile * last)), 0, last);
-        return sorted.at(index);
-    };
-    m_stats.gapP50Ms = pick(0.50);
-    m_stats.gapP95Ms = pick(0.95);
-    m_stats.gapP99Ms = pick(0.99);
+    m_stats.gapP50Ms = sortedQuantile(sorted, 0.50);
+    m_stats.gapP95Ms = sortedQuantile(sorted, 0.95);
+    m_stats.gapP99Ms = sortedQuantile(sorted, 0.99);
     m_stats.gapMaxMs = sorted.last();
     const auto over = [&sorted](double limit) {
         return int(
@@ -579,6 +598,41 @@ void PresentationShell::refreshGapStats() {
     m_stats.over50 = over(50.0);
     m_stats.over100 = over(100.0);
     m_stats.sampleCount = int(sorted.size());
+}
+
+void PresentationShell::recordWaitSample(double beginMs, double endMs) {
+    m_beginRing[size_t(m_waitCursor)] = beginMs;
+    m_endRing[size_t(m_waitCursor)] = endMs;
+    m_waitCursor = (m_waitCursor + 1) % kWaitCapacity;
+    if (m_waitFilled < kWaitCapacity) {
+        ++m_waitFilled;
+    }
+    // 120 个样本排序成本可以忽略，但仍在每帧热路径上：每 8 个样本刷一次，
+    // 面板 500ms 采一次样，约 130ms 的刷新延迟看不出来。
+    if ((m_waitSamples % 8) == 0) {
+        refreshWaitStats();
+    }
+    ++m_waitSamples;
+}
+
+void PresentationShell::refreshWaitStats() {
+    if (m_waitFilled < 2) {
+        return;
+    }
+    QList<double> beginSorted;
+    QList<double> endSorted;
+    beginSorted.reserve(m_waitFilled);
+    endSorted.reserve(m_waitFilled);
+    for (int index = 0; index < m_waitFilled; ++index) {
+        beginSorted.append(m_beginRing[size_t(index)]);
+        endSorted.append(m_endRing[size_t(index)]);
+    }
+    std::sort(beginSorted.begin(), beginSorted.end());
+    std::sort(endSorted.begin(), endSorted.end());
+    m_stats.beginP95Ms = sortedQuantile(beginSorted, 0.95);
+    m_stats.beginP99Ms = sortedQuantile(beginSorted, 0.99);
+    m_stats.endP95Ms = sortedQuantile(endSorted, 0.95);
+    m_stats.endP99Ms = sortedQuantile(endSorted, 0.99);
 }
 
 void PresentationShell::publishStats(bool interpolatedThisStep) {
@@ -601,6 +655,28 @@ void PresentationShell::publishStats(bool interpolatedThisStep) {
     }
 #endif
     m_stats.displaySize = m_presenter ? m_presenter->extent() : QSize();
+    m_stats.imageReuseMs = m_presenter ? m_presenter->imageReuseMs() : 0.0;
+    // 交换链重建/设备等待/尺寸去重是计数器，每帧都要带上：只靠帧率看不出
+    // "这一帧慢是因为又等了 GPU 空闲"，而那正是 A10 要证明的事。
+    m_stats.swapchainRecreates = m_presenter ? m_presenter->swapchainRecreates() : 0;
+    m_stats.deviceIdleWaits = m_presenter ? m_presenter->deviceIdleWaits() : 0;
+    m_stats.resizeSkips = m_presenter ? m_presenter->resizeSkips() : 0;
+    // A02：离屏提交按"实际调用"计——呈现层取后端累计数（在真正 begin 成功处 +1），
+    // QML 场景层/UI 层由 step() 对 SceneLayerHost 的两个公开计数取差分后累加。
+    // 发布值 = 自上次 publishStats 以来发生的 beginFrame/endFrame 对数：正常一帧 3 次
+    // （场景层 + UI 层 + 呈现层），空闲跳帧 0 次；失败步的计数顺延到下一次发布。
+    const quint64 backendSubmits = m_presenter ? m_presenter->offscreenSubmits() : 0;
+    // 没有后端计数器的路径（RhiPresentationBackend 默认返回 0）退回呈现层自己的
+    // 成功计数，否则会只剩 QML 的两层、凭空少掉呈现层这一次。
+    const quint64 presenterTotal = backendSubmits > 0 ? backendSubmits : m_presenterSubmits;
+    // 后端重建会让累计数归零：夹住下溢，宁可在切换那一帧低估，也不要报出一个天文数字。
+    const quint64 presenterDelta =
+        presenterTotal >= m_lastPresenterSubmits ? presenterTotal - m_lastPresenterSubmits
+                                                 : presenterTotal;
+    m_lastPresenterSubmits = presenterTotal;
+    const quint64 layerDelta = m_layerSubmits - m_lastLayerSubmits;
+    m_lastLayerSubmits = m_layerSubmits;
+    m_stats.submitsPerFrame = int(presenterDelta + layerDelta);
     ++m_stats.serial;
     RhineFg::publish(m_stats);
 }
@@ -655,18 +731,32 @@ bool PresentationShell::composite(QRhiCommandBuffer *cb, QRhiTexture *base, QRhi
 
 bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame &frame,
                                    bool allowInterpolation, bool *interpolatedOut) {
+    CrashRenderScope diagnosticScope("presentation.present");
     if (interpolatedOut) {
         *interpolatedOut = false;
     }
 
     QRhiCommandBuffer *cb = nullptr;
     m_probe.restart();
-    const QRhi::FrameOpResult begun = m_presenter->beginFrame(frame, &cb);
-    m_stats.beginMs = blend(m_stats.beginMs, tookMs());
+    m_frameProbe.restart();
+    const QRhi::FrameOpResult begun = [&] {
+        CrashRenderScope stage("presentation.beginFrame");
+        return m_presenter->beginFrame(frame, &cb);
+    }();
+    // A02：beginMs 的语义是"帧槽等待"——beginFrame 要等上一帧的命令缓冲/围栏归还。
+    // EMA 只能看趋势，原始样本单独留在 slotWaitMs/分位环里作为证据。
+    const double beginSample = tookMs();
+    m_stats.beginMs = blend(m_stats.beginMs, beginSample);
+    // 后端（Vulkan）在自己真正调用 beginOffscreenFrame 的地方量了一份；负数表示该
+    // 后端不提供，退回呈现层的计时（Metal 等路径）。两者差的是虚函数调用开销。
+    const double backendSlotWait = m_presenter->slotWaitMs();
+    m_stats.slotWaitMs = backendSlotWait >= 0.0 ? backendSlotWait : beginSample;
     if (begun != QRhi::FrameOpSuccess) {
         m_error = QStringLiteral("beginOffscreenFrame 失败（%1）").arg(int(begun));
         return false;
     }
+    // A02：begin 成功即计一次离屏提交（与后端 offscreenSubmits() 同一判据）。
+    ++m_presenterSubmits;
 
     // FG 的算法命令必须和合成落在同一个离屏帧里：先插值、再合成、最后注入信号量，
     // 三者由同一次提交保证顺序与可见性。
@@ -676,8 +766,16 @@ bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame
     const bool composed = composite(cb, base, m_host->overlayTexture(), frame.imageIndex);
     m_stats.compositeMs = blend(m_stats.compositeMs, tookMs());
     m_probe.restart();
-    const bool presented = m_presenter->endFrame(frame, composed);
-    m_stats.endMs = blend(m_stats.endMs, tookMs());
+    const bool presented = [&] {
+        CrashRenderScope stage("presentation.endFrame");
+        return m_presenter->endFrame(frame, composed);
+    }();
+    // A02：endMs 的语义是"离屏收尾"——只做提交与呈现，没有读回时不应有同步等待。
+    const double endSample = tookMs();
+    m_stats.endMs = blend(m_stats.endMs, endSample);
+    // 成对样本只记 begin/end 都走完的帧：失败的 begin 没有 end，混进分位会把
+    // "槽等待"与"提交失败前的那段等待"搅在一起。
+    recordWaitSample(m_stats.slotWaitMs, endSample);
     if (!presented) {
         m_error = m_presenter->lastError();
         return false;
@@ -689,10 +787,15 @@ bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame
     if (interpolatedOut) {
         *interpolatedOut = interpolated;
     }
-    // 呈现间隔与分项耗时都按"真的上屏了"来记，失败的那次不计入，免得把
+    // 呈现间隔与整帧耗时都按"真的上屏了"来记，失败的那次不计入，免得把
     // 交换链重建的停顿算成 FG 的成本。
     if (presented) {
-        m_stats.presentMs = blend(m_stats.presentMs, tookMs());
+        // 整帧 = 从 beginFrame 之前到 endFrame 返回之后。以前这里记的是"上屏耗时"，
+        // 但它在 endFrame 之后重新起表，只有几条记账语句那么长（恒≈0），
+        // 白白占掉一列指标；换成全程耗时后，"帧间隔 30ms 但分项都是 1ms"这类
+        // 缺口才有唯一可对的数（A01 的计时去重）。
+        m_stats.frameMs = blend(m_stats.frameMs, m_frameProbe.nsecsElapsed() / 1e6);
+        ++m_stats.frameId;
         if (m_presentClock.isValid()) {
             recordGap(double(m_presentClock.nsecsElapsed()) / 1e6);
         }
@@ -708,6 +811,7 @@ bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame
 }
 
 void PresentationShell::step() {
+    CrashRenderScope diagnosticScope("presentation.step");
 #ifdef Q_OS_IOS
     if (QGuiApplication::applicationState() != Qt::ApplicationActive) {
         return;
@@ -727,10 +831,27 @@ void PresentationShell::step() {
         m_stats.idleGapMs = blend(m_stats.idleGapMs, double(m_stepClock.nsecsElapsed() - m_stepEndNs) / 1e6);
     }
     if (!m_window->isVisible() || !m_window->isExposed() || m_window->visibility() == QWindow::Minimized) {
+#if defined(Q_OS_ANDROID)
+        // 第六轮：这里原本是静默 return——呈现泵的自续循环就此断掉，画面冻结在
+        // 最后一帧，只能等下一次外部唤醒（hudUpdated / 输入转发 markContentDirty）
+        // 重新排一步。「休眠后进详情 HUD 不显示、点一下就恢复」与它同症状。
+        // Android 上 Surface 状态可能瞬时抖动（合成器回收、切台），低频轮询续命：
+        // 每 100ms 一次空转成本可忽略，可见性恢复后 ≤100ms 自动复活。
+        static int hiddenSteps = 0;
+        if (++hiddenSteps % 60 == 1) {
+            qWarning("HUDFLOW step 停摆: visible=%d exposed=%d minimized=%d（累计 %d 步）",
+                     int(m_window->isVisible()), int(m_window->isExposed()),
+                     int(m_window->visibility() == QWindow::Minimized), hiddenSteps);
+        }
+        scheduleNext(100);
+#endif
         return;
     }
     const bool idle = m_backend->performance().value(QStringLiteral("idle")).toBool();
     const bool interpolationWanted = requested();
+    // Vulkan and D3D12 both need the engine-driven render cadence, including
+    // polling for completed asynchronous model/texture uploads.
+    const bool engineDriven = m_backendName != QLatin1String("metal");
     syncSizes();
 
     if (!m_host->resumeGraphics()) {
@@ -770,7 +891,7 @@ void PresentationShell::step() {
     const bool contentAdvanced = contentOnly
                                      ? (engineHud != m_lastEngineHud || engineScene != m_lastEngineScene)
                                      : (engineSteps != m_lastEngineSteps);
-    const bool engineAdvanced = m_backendName == "vulkan" && contentAdvanced;
+    const bool engineAdvanced = engineDriven && contentAdvanced;
     // 重渲已经由内容代次剔除，但"上屏"仍然每步都做：合成一次缓存纹理很便宜，而把
     // 上屏也一起砍掉会让 presented 从 46/s 掉到 31/s（实测），用户看到的出帧反而更少。
     // RHINE_PRESENT_ALWAYS=0 可退回"没有新内容就不上屏"的省电行为。
@@ -782,12 +903,12 @@ void PresentationShell::step() {
          !m_pendingRealFrame) {
 #else
     const auto engineSteps = m_backend->performance().value(QStringLiteral("steps")).toULongLong();
-    const bool engineAdvanced = m_backendName == "vulkan" && engineSteps != m_lastEngineSteps;
+    const bool engineAdvanced = engineDriven && engineSteps != m_lastEngineSteps;
     if (!m_host->contentDirty() && !engineAdvanced && !m_forcePresent && !m_pendingRealFrame) {
 #endif
         ++m_skippedSteps;
         publishStats(false);
-        if (m_backendName == "vulkan") {
+        if (engineDriven) {
 #ifdef Q_OS_LINUX
             // 看门狗：连续跳过太久说明可能有人漏标脏，强制补渲一次把画面拉回来。
             if (++m_consecutiveSkips >= kSkipWatchdogSteps) {
@@ -837,7 +958,7 @@ void PresentationShell::step() {
         return;
     }
 
-    if (m_backendName == "vulkan") {
+    if (engineDriven) {
         armFrameGeneration();
     }
     RhineRender::PresentationBackend::Frame frame;
@@ -874,9 +995,35 @@ void PresentationShell::step() {
     }
 
     m_probe.restart();
+    // A03：把引擎侧内容版本推进到本帧。必须在 renderFrame() 之前——脏标记是在那一刻
+    // 被消费的，晚一行就要等到下一帧才生效。默认（RHINE_LAYER_REVISION 未开）这里只
+    // 记录版本，置脏仍由 sceneUpdated/hudUpdated 信号驱动，行为与优化前一致。
+    m_host->setResourceRevision(m_backend->sceneRevision(), m_backend->hudRevision());
+#if defined(Q_OS_ANDROID)
+    // 第六轮轮询兜底：hudUpdated → requestOverlayContent → 出帧 这条事件链在
+    // 「列表按需休眠后进详情」场景被真机证实存在断点（前五轮在链路各环节修过全部无效：
+    // 数据侧判据、notifySceneRenderers、alpha 冻结、伪时钟、0/1ms 让出握手）。
+    // 改成不变量轮询：只要 HUD 纹理还落后于命令流（m_hudFramePending 未被
+    // Hud::updatePaintNode 清位），每个呈现步都强制 overlay 层置脏，逼本次
+    // renderFrame 把最新命令流画进纹理。pending 清位后这段零开销；
+    // Engine 侧 2 秒 failsafe 兜住「永远画不出来」的病态，不会无限烧 CPU。
+    if (m_backend->hudFramePending()) {
+        m_host->markOverlayDirty();
+        static int pollKicks = 0;
+        if (++pollKicks % 60 == 1) {
+            qWarning("HUDFLOW 轮询兜底: overlay 置脏（累计 %d 次）", pollKicks);
+        }
+    }
+#endif
     const auto previousSceneFrames = m_host->sceneRenderCount();
+    const auto previousOverlayFrames = m_host->overlayRenderCount();
     const bool sceneRendered = m_host->renderFrame();
     m_stats.sceneMs = blend(m_stats.sceneMs, tookMs());
+    // A02：QML 场景层/UI 层每次真正渲染都是一次 QQuickRenderControl 的 beginFrame/endFrame。
+    // SceneLayerHost 没有提交计数接口（不在本次改动范围），只能对两个公开计数取差分；
+    // 立即累加，后面的早退路径（渲染失败/呈现失败）也能把它们算进去。
+    m_layerSubmits += (m_host->sceneRenderCount() - previousSceneFrames) +
+                      (m_host->overlayRenderCount() - previousOverlayFrames);
     if (!sceneRendered) {
         qWarning().noquote() << "FG: 离屏渲染失败" << m_host->lastError();
         scheduleNext();
@@ -892,7 +1039,7 @@ void PresentationShell::step() {
     // 在离屏提交结束后读取这一帧输入；UI 单独更新不能再次插值同一帧场景。
     const bool interpolationAllowed = newScene && !idle && interpolationWanted &&
                                       m_framesSinceRecreate >= 2 &&
-                                      (m_backendName == "vulkan" || armFrameGeneration());
+                                      (engineDriven || armFrameGeneration());
     if (!presentOne(frame, interpolationAllowed, &interpolated)) {
         qWarning().noquote() << "FG: present 失败" << m_presenter->lastError();
         m_needRecreate = true;
@@ -906,13 +1053,19 @@ void PresentationShell::step() {
     m_forcePresent = false;
     reportStats();
     // 新更新和待呈现的真实帧继续排队；其余情况等待下一次内容更新。
-    if (m_backendName == "vulkan") {
+    if (engineDriven) {
         // 尾部立刻自续：关掉 vsync 时这个应用要的是"能跑多快跑多快"，限速会把帧率
         // 钉死在刷新率上，与设计意图相反。
         // 空转（同一画面反复提交）不再靠限速解决，而是靠 SceneLayerHost 的脏帧剔除：
         // 没有新内容时这里会自动落进上面的跳过分支，不会再重复渲染。
         scheduleNext(idle ? 100 : 0);
-    } else if (m_pendingRealFrame || m_host->contentDirty()) {
+    } else if (m_pendingRealFrame || m_host->contentDirty()
+#if defined(Q_OS_ANDROID)
+               // GLES 回退后端没有 vulkan 的尾部自续：pending 期间必须继续排队，
+               // 否则上面轮询兜底置的脏永远轮不到 renderFrame 来消费。
+               || m_backend->hudFramePending()
+#endif
+    ) {
         scheduleNext();
     }
 }
@@ -931,19 +1084,37 @@ void PresentationShell::reportStats() {
         << (inputs.motionVectors ? "ok" : "null") << "render" << inputs.renderSize << "display"
         << inputs.displaySize << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1)
         << "ms/frame"
-        // 分项：取图 / 场景 / 合成 / 上屏（上屏在 FIFO 下会阻塞到刷新点，
-        // 它就是"为什么每帧都掉到 20ms 档"的直接证据，必须一起打出来）
+        // 分项：取图 / 场景 / 合成 / 整帧。原来的"上屏"耗时在 endFrame 之后重新起表，
+        // 只量到几条记账语句（恒≈0），已经删掉；能回答"这一帧到底多久"的是整帧。
         << "取图" << QString::number(m_stats.acquireMs, 'f', 2) << "场景"
         << QString::number(m_stats.sceneMs, 'f', 2)
         // 光流+深度重建（prepare）与插值本身（dispatch）必须分开看：
         // 两者的优化手段完全不同，混在一起就不知道该调哪个。
         << "光流" << QString::number(m_stats.prepareMs, 'f', 2) << "插值"
         << QString::number(m_stats.dispatchMs, 'f', 2) << "合成"
-        << QString::number(m_stats.compositeMs, 'f', 2) << "上屏"
-        << QString::number(m_stats.presentMs, 'f', 2) << "起始" << QString::number(m_stats.beginMs, 'f', 2)
-        << "收尾" << QString::number(m_stats.endMs, 'f', 2) << "空档"
+        << QString::number(m_stats.compositeMs, 'f', 2) << "整帧"
+        << QString::number(m_stats.frameMs, 'f', 2) << "复用"
+        << QString::number(m_stats.imageReuseMs, 'f', 1)
+        // A02 语义写死：begin = 帧槽等待（等上一帧提交的槽），end = 离屏收尾。
+        << "帧槽" << QString::number(m_stats.beginMs, 'f', 2)
+        << "离屏收尾" << QString::number(m_stats.endMs, 'f', 2) << "空档"
         << QString::number(m_stats.idleGapMs, 'f', 2) << "跳过" << m_skippedSteps
+        // 重建 / 设备等待 / 尺寸去重：A10 的现场证据，一行看得出有没有白等 GPU。
+        << "重建" << m_stats.swapchainRecreates << "等待" << m_stats.deviceIdleWaits << "尺寸跳过"
+        << m_stats.resizeSkips
         << (m_frameClock.isValid() ? m_frameClock.restart() / double(m_presentedFrames - m_statsBase) : 0.0);
+    // A02：把两个"离屏边界"的语义写成一行，避免以后又把帧槽等待和收尾等待混成一个数。
+    qWarning().noquote()
+        << "FG 提交/等待: 提交" << m_stats.submitsPerFrame
+        << "次/帧（QML 场景层 + UI 层 + 呈现层，各一次 beginFrame/endFrame）" << "帧槽等待"
+        << QString::number(m_stats.slotWaitMs, 'f', 2)
+        << "ms（beginFrame 等上一帧提交的槽/围栏归还；原始样本，P95"
+        << QString::number(m_stats.beginP95Ms, 'f', 2) << "P99"
+        << QString::number(m_stats.beginP99Ms, 'f', 2) << "）" << "离屏收尾"
+        << QString::number(m_stats.endMs, 'f', 2)
+        << "ms（endFrame 只提交与呈现，无读回时不应同步等待；EMA，P95"
+        << QString::number(m_stats.endP95Ms, 'f', 2) << "P99"
+        << QString::number(m_stats.endP99Ms, 'f', 2) << "）";
     m_statsBase = m_presentedFrames;
 }
 
@@ -1236,6 +1407,9 @@ bool PresentationShell::start() {
     // iOS 切后台时窗口可以仍是 visible；必须按应用状态停掉 GPU 提交并释放离屏资源。
     connect(qGuiApp, &QGuiApplication::applicationStateChanged, this,
             [this, releaseBackgroundGraphics](Qt::ApplicationState state) {
+                if (m_stopped) {
+                    return;
+                }
                 const bool active = state == Qt::ApplicationActive;
                 if (m_backend) {
                     m_backend->setVisible(active);
@@ -1251,7 +1425,9 @@ bool PresentationShell::start() {
                     m_startupProbe.reset();
                     m_timer->stop();
                     // 同步释放，不能依赖进入后台后可能不再执行的定时器。
-                    releaseBackgroundGraphics();
+                    if (state == Qt::ApplicationSuspended) {
+                        releaseBackgroundGraphics();
+                    }
                 }
             });
 #endif
@@ -1298,7 +1474,8 @@ bool PresentationShell::start() {
                                  << m_renderedFrames << "skipped" << m_skippedSteps << "acqTimeout"
                                  << m_acquireTimeoutCount << "outOfDate" << m_outOfDateCount << "visible"
                                  << (m_window && m_window->isVisible()) << "pendingReal" << m_pendingRealFrame
-                                 << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1) << "dirty"
+                                 << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1) << "复用"
+                                 << QString::number(m_stats.imageReuseMs, 'f', 1) << "dirty"
 #ifdef Q_OS_LINUX
                                  << (m_host ? m_host->contentDirty() : false) << "force" << m_forcePresent
                                  << "| 3D层" << QString::number(m_host->sceneLayerMs(), 'f', 1) << "ms"

@@ -1,22 +1,51 @@
 #pragma once
 #include <QtGlobal>
+#include "MobileTarget.h"
 
 // 平台特性宏
 namespace PlatformFeatures {
-#if defined(Q_OS_IOS)
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+inline constexpr bool GlobalShortcuts = true;
+#else
+inline constexpr bool GlobalShortcuts = false;
+#endif
+#if defined(Q_OS_MACOS) || defined(Q_OS_IOS)
+inline constexpr bool NativeAppleAudio = true;
+#else
+inline constexpr bool NativeAppleAudio = false;
+#endif
+inline constexpr bool SpatialAudio = NativeAppleAudio;
+#ifdef Q_OS_WIN
+inline constexpr bool AutomaticTransition = true;
+#else
+inline constexpr bool AutomaticTransition = NativeAppleAudio;
+#endif
+#if !RHINE_MOBILE && (defined(Q_OS_WIN) || defined(Q_OS_LINUX) || defined(Q_OS_MACOS))
+inline constexpr bool MusicVideo = true;
+#else
+inline constexpr bool MusicVideo = false;
+#endif
+#ifdef Q_OS_WIN
+inline constexpr bool DesktopWallpaper = true;
+#else
+inline constexpr bool DesktopWallpaper = false;
+#endif
+#if RHINE_MOBILE
+// 移动端没有独立的官方客户端可交付，也没有可枚举的本地音乐目录与逐应用音量。
 inline constexpr bool OfficialPlayback = false;
 inline constexpr bool LocalMusic = false;
 inline constexpr bool ApplicationVolume = false;
-inline constexpr bool DesktopWindowControls = false;
-#elif defined(Q_OS_ANDROID)
-inline constexpr bool OfficialPlayback = false;
-inline constexpr bool LocalMusic = true;
-inline constexpr bool ApplicationVolume = true;
 inline constexpr bool DesktopWindowControls = false;
 #else
 inline constexpr bool OfficialPlayback = true;
 inline constexpr bool LocalMusic = true;
 inline constexpr bool ApplicationVolume = true;
 inline constexpr bool DesktopWindowControls = true;
+#endif
+// 桌面悬浮歌词
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+inline constexpr bool DesktopLyrics = true;
+#else
+inline constexpr bool DesktopLyrics = false;
 #endif
 }

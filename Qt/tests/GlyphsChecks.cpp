@@ -70,6 +70,84 @@ int main(int argc, char **argv) {
                   !line.front().isMark(),
               "wrapping never splits surrogate pairs or combining sequences");
     }
+#ifdef Q_OS_DARWIN
+    // 只验证缓存是否命中、何时失效；两条栅格路径的像素结果存在环境差异，不做逐像素比较。
+    // 用例只覆盖会进缓存的路径：整数 DPR、不透明度和裁剪都取默认值。
+    const QJsonArray cacheCommands{
+        QJsonArray{"save"},
+        QJsonArray{"translate", 8.125, 3.375},
+        QJsonArray{"scale", .87, .87},
+        QJsonArray{"alpha", 1.},
+        QJsonArray{"right-mask", QJsonArray{.9, .89, .86, .5}, 60.25, 85., 460., 135.},
+        QJsonArray{"text", baseline, 12.25, 6.875, 22., "regular", .125, QJsonArray{.12, .2, .32, 1.}},
+        QJsonArray{"text", samples[0], 16.5, 43.25, 24., "demibold", 0., QJsonArray{.8, .2, .11, .77}},
+        QJsonArray{"text", samples[5], 14.75, 78.125, 24., "regular", 0., QJsonArray{.2, .4, .6, 1.}},
+        QJsonArray{"restore"}};
+    for (const auto format : {QImage::Format_ARGB32_Premultiplied, QImage::Format_RGBA8888_Premultiplied}) {
+        for (double dpr : {1., 2.}) {
+            for (const QColor background : {QColor(Qt::transparent), QColor(51, 69, 87, 103)}) {
+                const auto render = [&](bool cached) {
+                    QImage image(QSize(int(480 * dpr), int(140 * dpr)), format);
+                    image.setDevicePixelRatio(dpr);
+                    image.fill(background);
+                    QPainter painter(&image);
+                    glyphs.commands(painter, cacheCommands, [](QString) { return QImage(); }, cached);
+                    painter.end();
+                    return image;
+                };
+                glyphs.clearRasterCache();
+                // 第一次只登记候选，第二次才栅格化并真正命中缓存。
+                render(true);
+                render(true);
+                check(glyphs.rasterCacheHits() > 0,
+                      QStringLiteral("repeated text enters raster cache: DPR %1 background %2")
+                          .arg(dpr)
+                          .arg(background.name(QColor::HexArgb)));
+            }
+        }
+    }
+    const QJsonArray maskedText{QJsonArray{"right-mask", QJsonArray{.9, .89, .86, .5}, 831, 300, 1920, 984},
+                                QJsonArray{"text", "POWERED BY RHINE LAB", 1736.68, 967, 10, "demibold", 0,
+                                           QJsonArray{.08, .085, .075, 1., "calibratedRGB"}},
+                                QJsonArray{"text", "metal-baseline-s…", 60, 845, 37, "regular", 0,
+                                           QJsonArray{.08, .085, .075, 1., "calibratedRGB"}},
+                                QJsonArray{"text", "Rendering Reference", 1075.2, 332, 15, "regular", 0,
+                                           QJsonArray{.08, .085, .075, 1., "calibratedRGB"}}};
+    const auto renderMaskedText = [&](bool cached, QColor background = Qt::transparent) {
+        QImage image(2560, 1440, QImage::Format_RGBA8888_Premultiplied);
+        image.fill(background);
+        QPainter painter(&image);
+        painter.scale(1440. / 1080, 1440. / 1080);
+        glyphs.commands(painter, maskedText, [](QString) { return QImage(); }, cached);
+        painter.end();
+        return image;
+    };
+    glyphs.clearRasterCache();
+    renderMaskedText(true);
+    renderMaskedText(true);
+    check(glyphs.rasterCacheHits() > 0, "translucent mask enters raster cache");
+    const auto hitsBeforeBackgroundChange = glyphs.rasterCacheHits();
+    const QColor changedBackground(30, 60, 80, 91);
+    renderMaskedText(true, changedBackground);
+    check(glyphs.rasterCacheHits() == hitsBeforeBackgroundChange,
+          "changed background never reuses stale pixels");
+    glyphs.clearRasterCache();
+    check(glyphs.rasterCacheBytes() == 0, "hidden-window trim releases raster cache");
+    {
+        // 背景与结果刚好占满像素预算时，键仍需要空间；应在分配临时画布前回退。
+        const QJsonArray largeMask{
+            QJsonArray{"right-mask", QJsonArray{.9, .89, .86, .5}, 0, 4096, 4096, 1024}};
+        QImage image(4096, 1024, QImage::Format_RGBA8888_Premultiplied);
+        for (int frame = 0; frame < 3; ++frame) {
+            image.fill(Qt::transparent);
+            QPainter painter(&image);
+            glyphs.commands(painter, largeMask, {}, true);
+        }
+        check(glyphs.rasterCacheBytes() == 0, "oversized masks avoid repeated scratch allocations");
+        glyphs.clearRasterCache();
+    }
+
+#endif
     const auto previewPath = application.arguments().value(2);
     if (!previewPath.isEmpty()) {
         QDir().mkpath(QFileInfo(previewPath).absolutePath());

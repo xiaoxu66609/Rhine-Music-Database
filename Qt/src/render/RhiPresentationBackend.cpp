@@ -1,5 +1,11 @@
 #include "PresentationBackend.h"
 #include "PresentationWindow.h"
+#ifdef Q_OS_WIN
+#include "../WindowsRoundedCorners.h"
+#endif
+#ifdef Q_OS_IOS
+#include "IOSWindow.h"
+#endif
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -26,19 +32,29 @@ class RhiPresentationBackend final : public PresentationBackend {
     }
 
     bool initialize(QSize logicalSize, bool vsync) override {
-#if defined(Q_OS_DARWIN) && QT_CONFIG(metal)
+#if (defined(Q_OS_DARWIN) && QT_CONFIG(metal)) || (defined(Q_OS_WIN) && RHINE_ENABLE_D3D12_BACKEND)
         m_window = std::make_unique<PresentationWindow>();
+#ifdef Q_OS_WIN
+        m_window->setSurfaceType(QSurface::Direct3DSurface);
+        m_window->setFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowTitleHint |
+                           Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint |
+                           Qt::WindowCloseButtonHint);
+#else
         m_window->setSurfaceType(QSurface::MetalSurface);
+#endif
         m_window->setTitle(QStringLiteral("RHINE MUSIC DATABASE"));
 #ifndef Q_OS_IOS
-        m_window->setMinimumSize(QSize(960, 540));
+        m_window->setMinimumSize(QSize(320, 540));
 #endif
         m_window->resize(logicalSize);
 #ifdef Q_OS_IOS
-        m_window->reportContentOrientationChange(Qt::LandscapeOrientation);
+        m_window->reportContentOrientationChange(iosContentOrientation());
         m_window->showFullScreen();
 #else
         m_window->show();
+#ifdef Q_OS_WIN
+        applyWindowsRoundedCorners(m_window.get());
+#endif
 #endif
 #ifndef Q_OS_IOS
         QElapsedTimer clock;
@@ -52,7 +68,7 @@ class RhiPresentationBackend final : public PresentationBackend {
 #else
         Q_UNUSED(logicalSize);
         Q_UNUSED(vsync);
-        m_error = QStringLiteral("此构建没有 Metal 后端");
+        m_error = QStringLiteral("此构建没有原生 QRhi 呈现后端");
         return false;
 #endif
     }
@@ -75,7 +91,7 @@ class RhiPresentationBackend final : public PresentationBackend {
             return true;
         }
         if (!m_swapchain->createOrResize()) {
-            m_error = QStringLiteral("Metal 交换链创建失败");
+            m_error = QStringLiteral("QRhi 交换链创建失败");
             return false;
         }
         m_size = m_swapchain->currentPixelSize();
@@ -110,8 +126,14 @@ class RhiPresentationBackend final : public PresentationBackend {
             return false;
         }
         m_frameOpen = false;
+        // 表面可能在帧开始后被系统销毁（退后台瞬间 Activity 停止、Surface 释放）：
+        // 此时绝不能再 queueBuffer，否则命中已释放的 ANativeWindow——真机上表现为
+        // "FORTIFY: pthread_mutex_lock called on a destroyed mutex" 的 SIGABRT，
+        // 进程死亡连带前台服务消失，是全部后台症状（被杀/冻结/控件失灵）的根源。
+        // 未暴露就 SkipPresent：本帧白渲，下一帧由 acquire 的 isExposed 门控接手。
+        const auto presentable = rendered && m_window->isExposed();
         const auto result =
-            m_rhi->endFrame(m_swapchain.get(), rendered ? QRhi::EndFrameFlags{} : QRhi::SkipPresent);
+            m_rhi->endFrame(m_swapchain.get(), presentable ? QRhi::EndFrameFlags{} : QRhi::SkipPresent);
         return result == QRhi::FrameOpSuccess;
     }
     void release() override {
@@ -140,7 +162,11 @@ class RhiPresentationBackend final : public PresentationBackend {
         return m_vsync ? QStringLiteral("VSync") : QStringLiteral("NoVSync");
     }
     QString backendName() const override {
+#ifdef Q_OS_WIN
+        return QStringLiteral("D3D12");
+#else
         return QStringLiteral("Metal");
+#endif
     }
     QString lastError() const override {
         return m_error;
@@ -148,11 +174,16 @@ class RhiPresentationBackend final : public PresentationBackend {
 
   private:
     bool createDevice() {
-#if defined(Q_OS_DARWIN) && QT_CONFIG(metal)
+#if (defined(Q_OS_DARWIN) && QT_CONFIG(metal)) || (defined(Q_OS_WIN) && RHINE_ENABLE_D3D12_BACKEND)
+#ifdef Q_OS_WIN
+        QRhiD3D12InitParams parameters;
+        m_rhi.reset(QRhi::create(QRhi::D3D12, &parameters));
+#else
         QRhiMetalInitParams parameters;
         m_rhi.reset(QRhi::create(QRhi::Metal, &parameters));
+#endif
         if (!m_rhi) {
-            m_error = QStringLiteral("Metal QRhi 创建失败");
+            m_error = QStringLiteral("QRhi 呈现设备创建失败");
             return false;
         }
         m_swapchain.reset(m_rhi->newSwapChain());
@@ -181,6 +212,11 @@ class RhiPresentationBackend final : public PresentationBackend {
 } // namespace
 
 std::unique_ptr<PresentationBackend> createPresentationBackend(const QString &name) {
+#if defined(Q_OS_WIN) && RHINE_ENABLE_D3D12_BACKEND
+    if (name == QLatin1String("d3d12")) {
+        return std::make_unique<RhiPresentationBackend>();
+    }
+#endif
     if (name == QLatin1String("metal")) {
         return std::make_unique<RhiPresentationBackend>();
     }

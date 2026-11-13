@@ -16,6 +16,22 @@ if (!win && !mac && !linux) {
 }
 const python = process.env.PYTHON || (win ? 'python' : 'python3');
 const nodeName = win ? 'node.exe' : 'node';
+// core-only 产物不打包任何第三方平台插件，干净安装默认不带插件；需要时显式 --plugins=full。
+const flavor = process.argv.slice(2).find((value) => value.startsWith('--plugins=')) || '--plugins=core';
+const flavorValue = flavor.slice('--plugins='.length);
+let pluginIds = null;
+if (flavorValue === 'core') {
+    pluginIds = [];
+} else if (flavorValue !== 'full') {
+    pluginIds = flavorValue
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+}
+if (flavorValue !== 'full' && flavorValue !== 'core' && !pluginIds.length) {
+    throw new Error('Unknown plugin flavor: ' + flavor);
+}
+const pluginsEnabled = pluginIds === null || pluginIds.length > 0;
 /**
  * 串行执行构建或部署命令，失败立即终止。
  * 命令和参数分开传递，不经过 Shell 解释。
@@ -47,7 +63,7 @@ function npmVersion() {
 }
 
 /**
- * npm 11.6 起默认拒绝安装 remote 类型的依赖，而锁定的酷狗 SDK 正是 codeload tarball。
+ * npm 11.6 起默认拒绝安装 remote 类型的依赖，而部分插件锁定的上游 SDK 正是 codeload tarball。
  * 只对声明在根 package.json 的远程来源放行，旧版 npm 不传该参数。
  */
 function npmRemoteArgs() {
@@ -82,8 +98,6 @@ function prepareResources() {
         fs.copyFileSync(path.join('Assets/fonts', file), path.join('output/resources', file));
     }
 
-    fs.cpSync('Assets/quality', 'output/resources/quality', { recursive: true });
-
     run(process.execPath, ['scripts/check-music-upstream.cjs']);
     const bridge = 'output/resources/MusicBridge';
     fs.mkdirSync(bridge, {
@@ -100,8 +114,7 @@ function prepareResources() {
         'ios-runtime.cjs',
         'ios-web-apis.cjs',
         'ios-system-trust.cjs',
-        'qq.cjs',
-        'kugou.cjs',
+        'android-web-apis.cjs',
         'lyrics-format.cjs',
         'lyrics-text.cjs',
         'lyrics-source.json',
@@ -111,15 +124,49 @@ function prepareResources() {
     ]) {
         fs.copyFileSync(path.join('MusicBridge', file), path.join(bridge, file));
     }
-    fs.cpSync('MusicBridge/upstream', path.join(bridge, 'upstream'), {
+    fs.cpSync('MusicBridge/client', path.join(bridge, 'client'), {
         recursive: true,
     });
-    fs.cpSync('MusicBridge/client', path.join(bridge, 'client'), {
+    fs.cpSync('MusicBridge/core', path.join(bridge, 'core'), {
+        recursive: true,
+    });
+    fs.cpSync('MusicBridge/plugins', path.join(bridge, 'plugins'), {
         recursive: true,
     });
     fs.cpSync('MusicBridge/download', path.join(bridge, 'download'), {
         recursive: true,
     });
+    if (pluginsEnabled && fs.existsSync('MusicBridge/local-plugins')) {
+        const selection = pluginIds ? pluginIds.join(',') : '';
+        run(process.execPath, [
+            'scripts/bundle-plugins.cjs',
+            'MusicBridge/local-plugins',
+            ...(selection ? [selection] : []),
+        ]);
+        if (pluginIds) {
+            for (const id of [...pluginIds, 'data', 'modules']) {
+                const source = path.join('MusicBridge/local-plugins', id);
+                if (fs.existsSync(source)) {
+                    fs.cpSync(source, path.join(bridge, 'local-plugins', id), {
+                        recursive: true,
+                        filter: (file) => !file.split(path.sep).includes('node_modules'),
+                    });
+                }
+            }
+        } else {
+            fs.cpSync('MusicBridge/local-plugins', path.join(bridge, 'local-plugins'), {
+                recursive: true,
+                filter: (source) => !source.split(path.sep).includes('node_modules'),
+            });
+        }
+        // Qt 在桥启动前读取 descriptor；构建期从 manifest 提取，避免把入口/签名配置带进 UI。
+        run(process.execPath, [
+            'scripts/export-descriptors.cjs',
+            'MusicBridge/local-plugins',
+            path.join(bridge, 'plugins/descriptors'),
+            ...(selection ? [selection] : []),
+        ]);
+    }
     // package lock 变更时重新安装依赖，避免旧版本残留
     const dependencyHash = createHash('sha256')
         .update(fs.readFileSync(path.join(bridge, 'package.json')))
@@ -130,6 +177,11 @@ function prepareResources() {
     if (installedHash !== dependencyHash) {
         npmCi(bridge);
         fs.writeFileSync(stamp, dependencyHash);
+    }
+    // Android 随包的是 libnode.so（进程内运行时），没有独立 node 可执行文件，
+    // 也就不需要满足"必须是官方独立分发包"的约束；桥接 bundle 由 build-android.cjs 自己打。
+    if (process.env.RHINE_ANDROID_BUILD === '1') {
+        return;
     }
     const binary =
         process.env.RHINE_NODE_BINARY ||
@@ -204,6 +256,9 @@ function prepareResources() {
  * 验证 Qt kit 后串行配置和编译，返回部署所需的路径与构建类型。
  */
 function buildQt() {
+    if (win || mac) {
+        run(process.execPath, ['scripts/prepare-crash-tools.cjs']);
+    }
     // Linux 的 Qt 通常由发行版装在 /usr，其余平台从 kit 目录读取。
     const qtRoots = new Map([
         [true, path.join(os.homedir(), 'Qt/6.12.0/macos')],
@@ -215,7 +270,7 @@ function buildQt() {
     }
     const config = process.env.RHINE_BUILD_TYPE || 'Release';
     const version = buildVersion();
-    run('cmake', [
+    const configure = [
         '-S',
         '.',
         '-B',
@@ -227,8 +282,17 @@ function buildQt() {
         '-DRHINE_PACKAGE_APP=OFF',
         `-DRHINE_VERSION=${version.version}`,
         `-DRHINE_RELEASE_BUILD=${version.release ? 'ON' : 'OFF'}`,
-    ]);
+    ];
+    if (win || mac) {
+        // CMake 生成符号时使用当前运行的 Node，避免依赖 PATH 里的系统安装。
+        configure.push(`-DRHINE_CRASH_NODE=${process.execPath}`);
+    }
+    run('cmake', configure);
     run('cmake', ['--build', 'output/qt-build']);
+    if (win || mac) {
+        // 符号生成只在打包流程执行一次，避免每次增量链接都重跑 dsymutil/dump_syms。
+        run('cmake', ['--build', 'output/qt-build', '--target', 'RhineCrashSymbols']);
+    }
     return {
         qt,
         config,
@@ -482,6 +546,7 @@ function deployLinuxRuntime(qt, app, binary, ffmpegLibraries = new Map()) {
     const pluginSource = linuxQtQuery(qt, 'QT_INSTALL_PLUGINS');
     // Wayland 平台插件依赖 shell 集成与装饰插件，必须整组跟随部署。
     for (const folder of [
+        'sqldrivers',
         'platforms',
         'imageformats',
         'tls',
@@ -512,6 +577,9 @@ function deployLinuxRuntime(qt, app, binary, ffmpegLibraries = new Map()) {
             if (folder === 'imageformats' && !linuxImageFormatPlugins.test(file)) {
                 continue;
             }
+            if (folder === 'sqldrivers' && file !== 'libqsqlite.so') {
+                continue;
+            }
             const destination = path.join(plugins, folder, file);
             fs.mkdirSync(path.dirname(destination), {
                 recursive: true,
@@ -524,6 +592,17 @@ function deployLinuxRuntime(qt, app, binary, ffmpegLibraries = new Map()) {
     // 仍能运行但行为不原生。官方 Qt 包把它放在 linux_gcc_64 的附属归档里，
     // 由 aqt 的 --autodesktop 安装，因此这里只提示，不阻断构建。
     const platforms = fs.readdirSync(path.join(plugins, 'platforms'));
+    // X11 是 Linux 包的底线：纯 Xorg 会话与 XWayland 都靠它，缺了用户连窗口都没有，
+    // 所以这里直接失败，而不是像 Wayland 那样只提示。
+    if (!platforms.includes('libqxcb.so')) {
+        throw Error('Qt X11 platform plugin missing (platforms/libqxcb.so); the Linux build cannot start');
+    }
+    // xcb 平台插件不自带 OpenGL 上下文，GLX/EGL 集成缺失时会在初始化 RHI 时退出。
+    const xcbGl = path.join(plugins, 'xcbglintegrations');
+    const xcbGlPlugins = fs.existsSync(xcbGl) ? fs.readdirSync(xcbGl) : [];
+    if (!xcbGlPlugins.some((name) => /^libqxcb-(?:glx|egl)-integration\.so$/.test(name))) {
+        console.warn('Qt X11 OpenGL integration missing; X11 sessions will fail to create an RHI context');
+    }
     if (!platforms.some((name) => name.startsWith('libqwayland'))) {
         console.warn('Qt Wayland platform plugin missing; Wayland sessions will fall back to XWayland');
     }
@@ -1047,6 +1126,12 @@ function prepareLinuxAppDir(app) {
             'export QT_PLUGIN_PATH="$here/usr/plugins"',
             'export QML_IMPORT_PATH="$here/usr/qml"',
             'export QT_QPA_PLATFORM_PLUGIN_PATH="$here/usr/plugins/platforms"',
+            '# 没有显示服务器时提前说清楚：否则 Qt 只会甩一句 could not load the Qt platform plugin。',
+            'if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then',
+            '    echo "Rhine: 未检测到 DISPLAY 或 WAYLAND_DISPLAY：当前没有可用的显示服务器。" >&2',
+            '    echo "Rhine: 纯 Xorg 会话请确认 DISPLAY 已导出；无头环境请用 --self-test。" >&2',
+            'fi',
+            '# 平台插件在启动时固定：纯 X11 / XWayland 用 RHINE_QPA_PLATFORM=xcb 强制走 X11。',
             'exit_code=0',
             '"$here/usr/bin/RhineMusicDatabase" "$@" || exit_code=$?',
             'exit "$exit_code"',
@@ -1085,6 +1170,12 @@ function deployApp(qt, config, existingBundle = '') {
             'output/qt-build/RhinePlaybackService.exe',
             path.join(app, 'RhinePlaybackService.exe'),
         );
+        for (const name of ['crashpad_handler.exe', 'RhineCrashReporter.exe', 'crashpad_wer.dll']) {
+            fs.copyFileSync(path.join('output/qt-build', name), path.join(app, name));
+        }
+        for (const name of ['crash-tools', 'crash-symbols']) {
+            fs.cpSync(path.join('output/qt-build', name), path.join(app, name), { recursive: true });
+        }
     }
 
     fs.mkdirSync(resources, { recursive: true });
@@ -1117,6 +1208,12 @@ function deployApp(qt, config, existingBundle = '') {
             });
             fs.copyFileSync(path.join(qt, 'plugins', plugin), dest);
         }
+        const sqliteDriver = path.join(qt, 'plugins/sqldrivers/libqsqlite.dylib');
+        if (fs.existsSync(sqliteDriver)) {
+            const destination = path.join(app, 'Contents/PlugIns/sqldrivers/libqsqlite.dylib');
+            fs.mkdirSync(path.dirname(destination), { recursive: true });
+            fs.copyFileSync(sqliteDriver, destination);
+        }
         deployMacAudioLibraries(qt, app);
         if (config === 'Debug') {
             for (const plugin of ['local', 'server', 'preview', 'quickprofiler', 'quickeventreplay']) {
@@ -1137,15 +1234,13 @@ function deployApp(qt, config, existingBundle = '') {
                     'Contents/Helpers/RhinePlaybackService.app/Contents/MacOS/RhinePlaybackService',
                 ),
             '-no-plugins',
+            // 资源尚未装入，嵌套 helper 也未封装签名；部署完成后统一由下方签名流程处理。
+            '-no-codesign',
         ]);
         fs.writeFileSync(
             path.join(resources, 'qt.conf'),
             '[Paths]\nPrefix=.\nPlugins=PlugIns\nQmlImports=Resources/qml\n',
         );
-        fs.rmSync(path.join(app, 'Contents/PlugIns/sqldrivers'), {
-            recursive: true,
-            force: true,
-        });
     } else if (win) {
         run(path.join(qt, 'bin/windeployqt.exe'), [
             '--' + config.toLowerCase(),
@@ -1179,10 +1274,14 @@ function deployApp(qt, config, existingBundle = '') {
             path.join(app, 'platforms', offscreen),
         );
         fs.writeFileSync(path.join(app, 'qt.conf'), '[Paths]\nPlugins=.\nQmlImports=qml\n');
-        fs.rmSync(path.join(app, 'sqldrivers'), {
-            recursive: true,
-            force: true,
-        });
+        const sqlDrivers = path.join(app, 'sqldrivers');
+        if (fs.existsSync(sqlDrivers)) {
+            for (const filename of fs.readdirSync(sqlDrivers)) {
+                if (!/^qsqlited?\.dll$/i.test(filename)) {
+                    fs.rmSync(path.join(sqlDrivers, filename), { force: true });
+                }
+            }
+        }
     }
     if (linux) {
         prepareLinuxAppDir(app);
@@ -1225,7 +1324,15 @@ function deployApp(qt, config, existingBundle = '') {
     }
     if (mac) {
         run('codesign', ['--force', '--sign', '-', path.join(resources, 'MusicBridge/node')]);
+        // 先封装 helper 的资源签名，再签外层应用，避免沿用链接器留下的裸可执行文件签名。
+        run('codesign', [
+            '--force',
+            '--sign',
+            '-',
+            path.join(app, 'Contents/Helpers/RhinePlaybackService.app'),
+        ]);
         run('codesign', ['--force', '--deep', '--sign', '-', app]);
+        run('codesign', ['--verify', '--deep', '--strict', app]);
     }
     if (linux) {
         const image = packageAppImage(app);
@@ -1242,6 +1349,16 @@ if (process.argv[2] === '--resources-only') {
     if (!mac || !bundle || !qt || !config) {
         throw new Error('CMake packaging requires a macOS bundle, Qt kit and build configuration');
     }
+    // 原地打包不会经过 buildQt，仍要生成与当前二进制匹配的采集器、解析器和符号。
+    let buildDirectory = path.dirname(path.resolve(bundle));
+    while (!fs.existsSync(path.join(buildDirectory, 'CMakeCache.txt'))) {
+        const parent = path.dirname(buildDirectory);
+        if (parent === buildDirectory) {
+            throw new Error('Cannot locate the CMake build directory for RhineCrashSymbols');
+        }
+        buildDirectory = parent;
+    }
+    run('cmake', ['--build', buildDirectory, '--target', 'RhineCrashSymbols']);
     console.log(deployApp(qt, config, path.resolve(bundle)));
 } else {
     const { qt, config } = buildQt();

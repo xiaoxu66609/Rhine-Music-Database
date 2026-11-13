@@ -20,6 +20,13 @@ struct Settings {
     bool vsync = true;
     quint64 revision = 0;
     bool nativeTemporalAvailable = false;
+#ifdef Q_OS_DARWIN
+    bool nativeInterpolationAvailable = false;
+
+    bool frameGeneration() const {
+        return interpolation && nativeInterpolationAvailable && supersample * renderPercent <= 100;
+    }
+#endif
 
     bool temporal() const {
         return modeName == QLatin1String("metalfx") && nativeTemporalAvailable &&
@@ -33,8 +40,13 @@ struct Settings {
 
 class RenderTelemetry {
   public:
+#ifdef Q_OS_DARWIN
+    void publish(QSize renderSize, QSize displaySize, int samples, const QString &implementation,
+                 bool enhanced, const QVariantMap &details = {}) {
+#else
     void publish(QSize renderSize, QSize displaySize, int samples, const QString &implementation,
                  bool enhanced) {
+#endif
         QMutexLocker lock(&m_mutex);
         m_value = {{"renderWidth", renderSize.width()},
                    {"renderHeight", renderSize.height()},
@@ -43,6 +55,9 @@ class RenderTelemetry {
                    {"samples", samples},
                    {"implementation", implementation},
                    {"enhanced", enhanced}};
+#ifdef Q_OS_DARWIN
+        m_value.insert(QStringLiteral("details"), details);
+#endif
     }
     QVariantMap snapshot() const {
         QMutexLocker lock(&m_mutex);
@@ -65,8 +80,16 @@ class RenderConfiguration {
                                                   {"vsync", "RHINE_VSYNC"}};
         for (const auto &entry : keys) {
             const auto environment = qgetenv(entry.second.toUtf8().constData());
-            const auto value =
-                environment.isEmpty() ? preference(entry.first) : QString::fromUtf8(environment);
+#ifdef Q_OS_DARWIN
+            // Apple 的 MetalFX 帧生成由设置页管理，偏好直接生效；显式环境变量仍优先。
+            const auto configured = preference(entry.first);
+#else
+            // FSR 插帧已从设置界面下线：配置文件里残留的 panel/fg=on 一律按"关"处理，
+            // 只有显式环境变量（排障用）才能打开。
+            const auto configured =
+                entry.first == QLatin1String("fg") ? QStringLiteral("off") : preference(entry.first);
+#endif
+            const auto value = environment.isEmpty() ? configured : QString::fromUtf8(environment);
             if (!value.isEmpty()) {
                 applyPreference(entry.first, value);
             }
@@ -85,6 +108,13 @@ class RenderConfiguration {
         QMutexLocker lock(&m_mutex);
         m_settings.nativeTemporalAvailable = available;
     }
+
+#ifdef Q_OS_DARWIN
+    void setNativeInterpolationAvailable(bool available) {
+        QMutexLocker lock(&m_mutex);
+        m_settings.nativeInterpolationAvailable = available;
+    }
+#endif
 
     bool applyPreference(const QString &key, const QString &value) {
         QMutexLocker lock(&m_mutex);

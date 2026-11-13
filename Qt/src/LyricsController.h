@@ -1,6 +1,7 @@
 #pragma once
 #include "MusicApi.h"
-#include <array>
+#include <QHash>
+#include <map>
 #include <memory>
 
 class LyricsController : public QObject {
@@ -8,6 +9,7 @@ class LyricsController : public QObject {
   public:
     explicit LyricsController(Host *host, QObject *parent = nullptr);
     void clear();
+    void clearCache(StorageCoordinator::Completion done);
     void load(const QJsonObject &track, bool retry = false);
     void matchCover(const QJsonObject &track);
     void selectLocalSource(const QJsonObject &track, const QString &source);
@@ -42,8 +44,14 @@ class LyricsController : public QObject {
   private:
     struct Load {
         quint64 generation = 0;
+        quint64 cacheGeneration = 0;
+        quint64 diskGeneration = 0;
+        int accountEpoch = 0;
         QJsonObject track;
         QJsonObject native;
+        QString selection;
+        QString lyricsProvider;
+        bool guest = true;
         bool networkFailed = false;
         int provider = 0;
         QStringList queries;
@@ -57,9 +65,14 @@ class LyricsController : public QObject {
     };
     using Pending = std::shared_ptr<Load>;
     Host *m_host;
-    std::array<std::unique_ptr<MusicApi>, 3> m_apis;
+    QStringList m_providers;
+    std::map<QString, std::unique_ptr<MusicApi>> m_apis;
     quint64 m_generation = 0;
+    quint64 m_cacheGeneration = 0;
     double m_globalOffsetMs = 0;
+    QHash<QString, qint64> m_lyricBlockedUntil;
+    QHash<QString, qint64> m_lastLyricRequest;
+    QHash<QString, qint64> m_lyricsRetryAfter;
     QJsonObject m_document;
     QVector<double> m_starts;
     QJsonArray m_cache;
@@ -68,12 +81,17 @@ class LyricsController : public QObject {
     MusicApi &api(const QString &provider);
     MusicApi::Valid valid(const Pending &pending);
     void supplement(const Pending &pending);
-    void loadLocal(const QJsonObject &track, const Pending &pending);
+    void loadLocal(const QJsonObject &track, const Pending &pending, bool retry);
     void search(const Pending &pending);
     void fetchCandidate(const Pending &pending);
     void loadCandidateCover(const Pending &pending, const QJsonObject &candidate, const QString &provider);
     void tryCover(const Pending &pending, const QString &url);
     void finish(const Pending &pending);
-    void accept(QJsonObject document, const QJsonObject &track);
-    void persist();
+    void accept(QJsonObject document, const Pending &pending, bool cacheResult = true);
+    Pending newLoad(const QJsonObject &track, const QString &selection);
+    CacheKey cacheKey(const Pending &pending, QString source, QString sourceTrack = {}) const;
+    QString memoryKey(const Pending &pending, const CacheKey &selection) const;
+    void lookup(const Pending &pending, std::function<void(bool)> done);
+    void loadOnline(const Pending &pending);
+    void migrateLegacyCache();
 };
