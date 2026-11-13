@@ -133,8 +133,9 @@ fi
 
 export LDFLAGS="-Wl,-z,max-page-size=16384"
 
-# nodejs-mobile 18.20.4 的 android-configure 只接受 Python 3.8–3.11。
-# install-qt-action 会把 PATH 上的 python3 换成 3.15，所以这里显式把可用解释器放到最前。
+# android-configure 会改用 python3.11。它接着调用的 ./configure 却先找 python3.12，
+# 找到 GitHub 上的 3.12.16 后因没有 distutils 退出（ModuleNotFoundError: distutils）。
+# 把 3.11 放到 PATH 最前，并让 python3.12 及以上的名字也指向它。
 python_for_node=""
 for candidate in python3.11 python3.10 python3.9 python3.8; do
     if command -v "${candidate}" >/dev/null 2>&1; then
@@ -147,8 +148,9 @@ if [[ -z "${python_for_node}" ]]; then
     exit 1
 fi
 python_shim="$(mktemp -d)"
-ln -s "${python_for_node}" "${python_shim}/python3"
-ln -s "${python_for_node}" "${python_shim}/python"
+for name in python python3 python3.8 python3.9 python3.10 python3.11 python3.12 python3.13 python3.14 python3.15; do
+    ln -s "${python_for_node}" "${python_shim}/${name}"
+done
 export PATH="${python_shim}:${PATH}"
 
 (
