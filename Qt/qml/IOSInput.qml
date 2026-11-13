@@ -6,7 +6,7 @@ DragHandler {
     required property var backend
     target: null
     acceptedDevices: PointerDevice.TouchScreen
-    enabled: stage.ios && (!!backend.state.modal || backend.state.mode === "detail")
+    enabled: stage.touchInput && (!!backend.state.modal || backend.state.mode === "detail")
     xAxis.enabled: false
     property real previousY: 0
     onActiveChanged: previousY = 0

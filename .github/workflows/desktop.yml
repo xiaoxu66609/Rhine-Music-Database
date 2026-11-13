@@ -378,3 +378,82 @@ jobs:
           name: RHINE-MUSIC-DATABASE-iOS-arm64
           path: output/RhineMusicDatabase-*-ios-unsigned.ipa
           if-no-files-found: error
+
+  android:
+    name: Android arm64 (release APK)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RHINE_VERSION: ${{ inputs.release_version || '' }}
+      RHINE_BUILD_JOBS: '4'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26.11.1'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            MusicBridge/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          # nodejs-mobile 18.20.4 android-configure 尚不支持 Python 3.12。
+          python-version: '3.11'
+      # v3 默认会装已下架的 SDK 包 tools；v4 只装 platform-tools，其余在本 job 下一步用 sdkmanager 安装。
+      - uses: android-actions/setup-android@v4
+      - name: Install Android SDK and NDK
+        run: |
+          set -euo pipefail
+          # 主机侧 qsb 链接 libEGL，镜像里不一定有。
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libegl1 libgl1 gcc-multilib g++-multilib
+          # sdkmanager 在许可证问完后会让 yes 收到 SIGPIPE；不能因此让安装失败。
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
+          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            output/dependencies/node-mobile-android/nodejs-mobile-src
+            output/dependencies/node-mobile-android/bin/arm64-v8a/libnode.so
+          key: libnode-v18.20.4-ndk27-${{ hashFiles('scripts/build-libnode-android.sh', 'scripts/audit-android.py') }}
+          restore-keys: libnode-v18.20.4-ndk27-
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.12.0'
+          # Qt 6.7+ 的 Android 包在 aqt 的 all_os 主机下发布，linux android 列表止于 6.7.3。
+          host: all_os
+          target: android
+          arch: android_arm64_v8a
+          aqtsource: git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7
+          modules: qtshadertools qtmultimedia
+          # install-qt-action 在 aqt 支持时会自动加上 --autodesktop，
+          # 装上同版本 desktop kit，提供 androiddeployqt 和 qsb。
+          setup-python: false
+          cache: true
+      - name: Install build dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Use setup-node runtime for resource preparation
+        run: |
+          node - <<'JS' >> "$GITHUB_ENV"
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const license = path.resolve(path.dirname(process.execPath), '../LICENSE');
+          if (!fs.existsSync(license)) {
+              throw new Error('Standalone Node license missing');
+          }
+          console.log('RHINE_NODE_BINARY=' + process.execPath);
+          console.log('RHINE_NODE_LICENSE=' + license);
+          JS
+      - name: Build signed release APK
+        run: npm run build:android
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RHINE-MUSIC-DATABASE-Android-arm64
+          path: output/RhineMusicDatabase-*-Android-arm64.apk
+          if-no-files-found: error

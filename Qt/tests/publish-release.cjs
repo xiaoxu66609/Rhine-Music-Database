@@ -98,7 +98,10 @@ try {
     createUpdateFeed(directory, options.tag, options.repository);
     const result = publishRelease(options, api);
     assert.equal(result.draft, false);
-    assert.equal(assets.length, 5);
+    assert.equal(
+        assets.length,
+        require('../../scripts/release-version.cjs').distributionPlatforms.length + 1,
+    );
     assert.equal(calls.filter((call) => call.method === 'PATCH').length, 1);
     for (const failure of ['corrupt', 'missing']) {
         mode = failure;

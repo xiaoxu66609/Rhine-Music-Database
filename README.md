@@ -31,6 +31,7 @@
 | macOS   | `output/RHINE MUSIC DATABASE.app`                            |
 | Windows | `output/RhineMusicDatabase-<构建标识>-Windows-x64-Setup.exe` |
 | Linux   | `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage` |
+| Android | `output/RhineMusicDatabase-<构建标识>-Android-arm64.apk`     |
 
 **macOS 若提示应用已损坏，需要执行**
 
@@ -139,7 +140,7 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 - [x] 亮色、暗色、跟随系统与减少动效
 - [x] 音质选择、试听提示与可选替代音源
 - [x] macOS 系统媒体按钮
-- [x] macOS Apple Silicon、Linux x86_64 与 Windows x64 构建和打包
+- [x] macOS Apple Silicon、Linux x86_64、Windows x64 与 Android arm64 构建和打包
 - [ ] MV 播放
 
 **音质和完整播放取决于账号权限与音源可用性；返回试听时会明确提示。替代音源默认关闭，开启时使用锁定上游的匹配实现，音质由匹配来源决定，失败时可使用官方入口。**
@@ -157,6 +158,7 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 | Windows  | ✅     | 已停用      | ✅     | -     |
 | macOS    | -      | -           | -      | ✅    |
 | iOS / iPadOS | - | - | - | ✅ |
+| Android  | 可选   | -           | OpenGL ES | -    |
 | Linux    | ✅     | -           | ✅     | -     |
 
 | API         | FXAA   | SSAA   | MSAA   | TAA     | Upscaling        | Frame Generation |
@@ -267,7 +269,7 @@ AppImage 默认使用 DwarFS 镜像：跨文件去重后体积明显小于 squas
 默认构建类型为 `Release`，Linux 构建为主程序开 LTO（`INTERPROCEDURAL_OPTIMIZATION_RELEASE`，GCC 下即 `-flto=auto`）。工具链缺 LTO 插件时 CMake 只会告警并降级，产物约大 1.5 MB；设 `RHINE_REQUIRE_LTO=1` 可把这种降级变成配置期错误（CI 的 Linux 任务即如此），核对方法见构建日志里的 `IPO/LTO enabled for Release` 一行。设置 `RHINE_BUILD_TYPE=Debug` 可构建调试版本；`PYTHON` 可覆盖 Python 命令。Qt 6.12+ 安装包含官方 QML Live Preview 工具时，可使用 `npm run preview` 进行热预览。
 
 设置 `RHINE_VERSION=vX.Y.Z` 时构建正式版，分发包的构建标识为 `vX.Y.Z`。
-未指定版本时为开发版：设置中显示最后一次提交标题、12 位短 SHA 和“开发版”，三平台分发包均以短 SHA 作为构建标识。
+未指定版本时为开发版：设置中显示最后一次提交标题、12 位短 SHA 和“开发版”，桌面、iOS 与 Android 分发包均以短 SHA 作为构建标识。
 检查更新仅获取发布信息；点击“前往更新”会打开 [GitHub releases 页面](https://github.com/MikeQu223/Rhine-Music-Database/releases)，由浏览器下载，不在应用内下载文件。
 
 `npm test` 使用本地响应验证音乐与播放状态、账号隔离、输入法焦点与提交、窗口迁移、锁定上游、打包通信和部署资源。默认测试不包含视觉快照、固定动画采样或桌面场景组合。离线测试不替代真实账号、在线音源、显示缩放、系统输入法与系统集成的实机检查。
@@ -280,9 +282,23 @@ Qt RHI 使用私有头文件，升级 Qt 后需重新编译并验证。
 执行 `npm run build:ios`，生成 `output/RhineMusicDatabase-ios-unsigned.ipa`；该文件需自行签名后安装。
 `RHINE_IOS_QT` 可以指定其他同版本 kit 路径。构建自动校验 NodeMobile 下载哈希，并检查包内架构、资源和动态依赖。
 
+## Android 构建
+
+需要 JDK 17、Android SDK Platform 36、Build-Tools 36.0.0、NDK 27.2.12479018，以及 Qt 6.12.0 的 `android_arm64_v8a` kit 和同版本的 Linux desktop kit（提供 `androiddeployqt` 与 `qsb`）。设置 `ANDROID_SDK_ROOT` 后执行：
+
+```sh
+export RHINE_ANDROID_QT="$HOME/Qt/6.12.0/android_arm64_v8a"
+npm ci
+npm run build:android
+```
+
+产物是已签名的 release APK：`output/RhineMusicDatabase-<构建标识>-Android-arm64.apk`。默认使用仓库里的侧载密钥 `Qt/android/rhine-release.keystore`（别名 `rhine`，口令 `rhine-sideload`），因此 GitHub Actions 不需要额外密钥就能直接安装。这把密钥是公开的，只适合分发安装包，不能当作应用商店的上传密钥。要换自己的密钥，设置 `RHINE_ANDROID_KEYSTORE`、`RHINE_ANDROID_KEY_ALIAS`、`RHINE_ANDROID_KEYSTORE_PASSWORD` 和 `RHINE_ANDROID_KEY_PASSWORD`。
+
+发布 workflow 会把这个 APK 和桌面、iOS 包一起上传。应用内「前往更新」会按 `Android-arm64.apk` 识别当前平台的发布文件。面板内播放走嵌入的 Node 18 运行时和 OpenGL ES；官方客户端入口在 Android 上不可用。首次启动会把资源从 APK 解到应用私有目录。
+
 ## 本机数据与隐私
 
-搜索、歌曲资料、扫码与个人音乐库请求发送至所选音乐平台，封面从网易云、QQ 或酷狗音乐的图片域名加载。原始认证记录仅由 C++ 和 Node 桥处理；macOS 保存在钥匙串，Windows 通过 DPAPI 加密，Linux 保存在 `~/.local/share/RhineMusicDatabase/rhine.music.database/account.credential`（权限 `0600`）。本项目没有自建的数据收集服务器、分析 SDK 或自动上传诊断功能。
+搜索、歌曲资料、扫码与个人音乐库请求发送至所选音乐平台，封面从网易云、QQ 或酷狗音乐的图片域名加载。原始认证记录仅由 C++ 和 Node 桥处理；macOS 保存在钥匙串，Windows 通过 DPAPI 加密，Linux 保存在 `~/.local/share/RhineMusicDatabase/rhine.music.database/account.credential`（权限 `0600`），Android 保存在应用私有目录的 `account.credential`。本项目没有自建的数据收集服务器、分析 SDK 或自动上传诊断功能。
 
 登录为可选功能。应用不读取浏览器或官方客户端的登录信息。
 

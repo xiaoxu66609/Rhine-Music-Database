@@ -1,6 +1,8 @@
 #include "BridgeProcess.h"
 #include "AppStorage.h"
+#ifdef Q_OS_IOS
 #include "IOSServerTrust.h"
+#endif
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -14,7 +16,13 @@
 #include <utility>
 #include <thread>
 
+#ifdef Q_OS_ANDROID
+namespace node {
+int Start(int argc, char **argv);
+}
+#else
 extern "C" int node_start(int argc, char *argv[]);
+#endif
 
 namespace {
 /** Node 只初始化一次；Qt 主线程通过带随机令牌的回环连接控制独立 Worker。 */
@@ -67,6 +75,7 @@ class NodeRuntime : public QObject {
                 server.close();
                 socket->write(queued);
                 queued.clear();
+#ifdef Q_OS_IOS
             } else if (message["type"] == "system-trust") {
                 const auto session = message["session"].toString();
                 const auto id = message["id"].toString();
@@ -76,6 +85,7 @@ class NodeRuntime : public QObject {
                           {"id", id},
                           {"trusted", trusted}});
                 });
+#endif
             } else if (owner) {
                 owner->accept(message);
             }
@@ -103,7 +113,11 @@ class NodeRuntime : public QObject {
                 values[index] = cursor;
                 cursor += std::strlen(cursor) + 1;
             }
+#ifdef Q_OS_ANDROID
+            node::Start(4, values);
+#else
             node_start(4, values);
+#endif
             exited = true;
             QMetaObject::invokeMethod(this, [this] {
                 if (owner) {

@@ -350,7 +350,7 @@ void Host::send(QString key) {
             finish(key, {}, "无法创建音乐服务临时目录");
             return;
         }
-#ifdef Q_OS_IOS
+#if defined(Q_OS_IOS) || defined(Q_OS_ANDROID)
         pending.insert(work.id, key);
         child.start(root, temporary->path(), kugouEdition);
         return;

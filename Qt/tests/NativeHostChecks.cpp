@@ -68,11 +68,13 @@ bool runNativeHostChecks(const QString &root) {
     ok &= host.image("current-cover") == largeCover && host.image("playing-cover") == largeCover;
     bool invalidId = false;
     bool official = false;
-#ifdef Q_OS_IOS
+#if defined(Q_OS_IOS) || defined(Q_OS_ANDROID)
     host.playOfficial("invalid", [&](QString error) { invalidId = error == "当前平台仅支持面板内播放"; });
     host.playOfficial("42", [&](QString value) { official = value == "当前平台仅支持面板内播放"; });
+#ifdef Q_OS_IOS
     host.mediaControl("volume", 0.2);
     ok &= host.mediaState()["volume"].toDouble() == 1.0;
+#endif
 #else
     host.playOfficial("invalid", [&](QString error) { invalidId = error == "请先选择一首歌曲"; });
     host.playOfficial("42", [&](QString value) { official = value == "OFFLINE_PLAY:42"; });
